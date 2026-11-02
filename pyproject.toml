@@ -1,0 +1,33 @@
+[project]
+name = "ajou-assistant"
+version = "0.1.0"
+description = "학교 공지 수집·개인화 판단·Discord 알림 (기본 수집처는 아주대)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "anthropic>=0.75",
+  "beautifulsoup4>=4.12",
+  "discord.py>=2.4",
+  "httpx>=0.27",
+  "olefile>=0.47",
+  "pillow>=11",
+  "pydantic>=2",
+  "xlrd>=2",
+]
+
+[project.scripts]
+ajou = "ajou_assistant.cli:main"
+ajou-bot = "ajou_assistant.bot:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ajou_assistant"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

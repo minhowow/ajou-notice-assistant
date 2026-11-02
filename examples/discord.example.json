@@ -1,0 +1,17 @@
+{
+  "_comment": "AJOU_HOME 폴더에 discord.json으로 복사해 채우세요. 값은 따옴표 안의 숫자 문자열입니다. 채널 ID를 비워 두고 `ajou style`을 실행하면 채널을 만들어 채워 줍니다. 이 줄은 지워도 됩니다.",
+  "guild_id": "",
+  "channels": {
+    "urgent": "",
+    "scholarship": "",
+    "international": "",
+    "general": "",
+    "digest": "",
+    "records": "",
+    "system": "",
+    "chat": "",
+    "career": ""
+  },
+  "owner_id": "",
+  "calendar_account": ""
+}

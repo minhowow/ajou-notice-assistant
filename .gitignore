@@ -1,0 +1,31 @@
+# 개인 데이터와 비밀값은 이 저장소에 두지 않는다. 데이터 폴더(AJOU_HOME)를 따로 쓰는 것이 원칙이지만,
+# 기본값이 현재 폴더라 실수로 여기서 실행해도 올라가지 않게 막아 둔다.
+/auto/
+/outputs/
+/records/
+/discord.json
+/boards.json
+/CURRENT_PROFILE.md
+/private_facts.md
+
+# 비밀값과 키
+.env
+.env.*
+*.key
+*.pem
+env
+
+# 파이썬
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# 편집기·OS
+.DS_Store
+.idea/
+.vscode/

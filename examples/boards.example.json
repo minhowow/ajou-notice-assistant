@@ -1,0 +1,18 @@
+[
+  {
+    "key": "notice",
+    "name": "일반공지",
+    "url": "https://www.example-university.ac.kr/board/notice.do",
+    "kind": "cms",
+    "model": null,
+    "pages": 40
+  },
+  {
+    "key": "jobs",
+    "name": "채용",
+    "url": "https://www.example-university.ac.kr/career/recruit.aspx",
+    "kind": "recruit",
+    "model": "claude-haiku-5-5",
+    "pages": 5
+  }
+]
