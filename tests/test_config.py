@@ -141,3 +141,20 @@ def test_git_sync_is_off_unless_enabled(tmp_path, monkeypatch):
     assert sync.enabled()
     (tmp_path / ".git").rmdir()
     assert not sync.enabled()  # git 저장소가 아니면 켜 두어도 하지 않는다
+
+
+def test_data_paths_can_come_from_the_env_file(tmp_path, monkeypatch):
+    import importlib
+    from ajou_assistant import config
+    env = tmp_path / "env"
+    env.write_text(f"AJOU_HOME={tmp_path / 'data'}\nAJOU_CONFIG_DIR={tmp_path / 'data' / 'conf'}\n")
+    monkeypatch.setenv("AJOU_ENV_FILE", str(env))
+    monkeypatch.delenv("AJOU_HOME", raising=False)
+    monkeypatch.delenv("AJOU_CONFIG_DIR", raising=False)
+    try:
+        importlib.reload(config)
+        assert config.HOME_DIR == (tmp_path / "data").resolve()
+        assert config.DISCORD_FILE == (tmp_path / "data" / "conf" / "discord.json").resolve()
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

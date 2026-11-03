@@ -5,7 +5,7 @@
 비밀값(API 키, 봇 토큰)은 저장소 밖 env 파일에서만 읽는다.
 
 환경변수 (env 파일에 같은 이름으로 적어도 된다)
-  AJOU_HOME             데이터 폴더. 기본은 현재 작업 폴더
+  AJOU_HOME             데이터 폴더. 기본은 현재 작업 폴더 (이 줄과 아래 경로 설정도 env 파일에 적어도 된다)
   AJOU_CONFIG_DIR       discord.json, boards.json, private_facts.md, prompt.md를 둘 폴더. 기본은 AJOU_HOME
   AJOU_ENV_FILE         비밀값 파일. 기본 ~/.config/ajou-assistant/env
   AJOU_STATE_DIR        잠금·대응표 폴더. 기본 ~/.cache/ajou-assistant
@@ -29,13 +29,31 @@ class SetupError(RuntimeError):
     """설정이 빠졌을 때. 사용자가 고칠 일이므로 트레이스백 없이 메시지만 보여 준다."""
 
 
+ENV_FILE = Path(os.environ.get("AJOU_ENV_FILE") or Path.home() / ".config" / "ajou-assistant" / "env").expanduser()
+
+
+def _path_setting(name: str) -> str:
+    """경로 설정은 환경변수, 없으면 env 파일에서 읽는다. 매번 export하지 않아도 되게."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        lines = ENV_FILE.read_text().splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        key, _, value = line.strip().partition("=")
+        if key.strip() == name and value.strip():
+            return value.strip()
+    return ""
+
+
 def _home() -> Path:
-    raw = os.environ.get("AJOU_HOME")
+    raw = _path_setting("AJOU_HOME")
     return (Path(raw).expanduser() if raw else Path.cwd()).resolve()
 
 
 HOME_DIR = _home()
-CONFIG_DIR = Path(os.environ.get("AJOU_CONFIG_DIR") or HOME_DIR).expanduser().resolve()
+CONFIG_DIR = Path(_path_setting("AJOU_CONFIG_DIR") or HOME_DIR).expanduser().resolve()
 AUTO = HOME_DIR / "auto"
 NOTICES = AUTO / "notices"
 SEEN_FILE = NOTICES / "seen.jsonl"
@@ -51,7 +69,6 @@ USAGE_DIR = AUTO / "usage"
 DISCORD_FILE = CONFIG_DIR / "discord.json"
 BOARDS_FILE = CONFIG_DIR / "boards.json"
 PROMPT_FILE = CONFIG_DIR / "prompt.md"  # 스레드 대화에 덧붙일 개인 지시(선택)
-ENV_FILE = Path(os.environ.get("AJOU_ENV_FILE") or Path.home() / ".config" / "ajou-assistant" / "env").expanduser()
 STATE_DIR = Path(os.environ.get("AJOU_STATE_DIR") or Path.home() / ".cache" / "ajou-assistant").expanduser()
 SESSIONS_FILE = STATE_DIR / "threads.json"  # 스레드 → 세션·공지. 봇이 쓰고 공지 실행은 읽기만 한다.
 
