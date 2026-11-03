@@ -1,4 +1,4 @@
-"""재공지 묶기 (11/3): 후보 고르기, AI 판단 검증, 묶음 단위 독촉, 스레드·답장 알림, 봇의 다음 턴 자료."""
+"""재공지 묶기 (11/3): 후보 고르기, AI 판단 검증, 묶음 단위 독촉, 스레드·답장 알림, 봇의 다음 턴 자료. 핀과 추적 (11/3)."""
 import json
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -100,6 +100,9 @@ class FakeDiscord:
     def send(self, channel, payload, files=None, tier=Tier.NOTIFY):
         self.sent.append((channel, payload, tier))
         return "m1"
+
+    def pin(self, channel, message_id, on=True):
+        self.sent.append((channel, {"pin": message_id, "on": on}, None))
 
 
 def test_reminders_go_once_per_group_and_stop_when_any_member_is_closed(notices, monkeypatch):
@@ -226,3 +229,91 @@ def test_tracked_notice_gets_reminders_even_when_medium(notices, monkeypatch):
     assert [row["id"] for _, _, row in cli.upcoming_deadlines(date(2026, 11, 20))] == [378230]
     store.mark_item(378230, "done")
     assert cli.send_reminders(fake, date(2026, 11, 29)) == 0
+
+
+class FakePins:
+    """핀 목록을 바꿀 수 있는 채널과 #📌핀 채널."""
+
+    def __init__(self, channel_id):
+        self.id = channel_id
+        self.pinned = []
+        self.posts, self.deleted = [], []
+
+    async def pins(self, limit=50, oldest_first=True):
+        for message in list(self.pinned):
+            yield message
+
+    async def send(self, text, **kwargs):
+        self.posts.append(text)
+        return SimpleNamespace(id=900 + len(self.posts))
+
+    def get_partial_message(self, message_id):
+        async def delete():
+            self.deleted.append(message_id)
+        return SimpleNamespace(delete=delete)
+
+
+def test_pin_is_tracking_and_unpin_releases_only_tracking(notices, tmp_path, monkeypatch):
+    import asyncio
+    from ajou_assistant import bot
+    monkeypatch.setattr(bot, "PINS_FILE", tmp_path / "pins.json")
+    pushed = []
+    monkeypatch.setattr(bot, "sync_push", lambda *args: pushed.append(args))
+    monkeypatch.setattr(bot, "pin_summary", lambda message: f"핀 {message.id}")
+    notices(row(1, "OO장학금", "2026-11-01T10:00", channel="scholarship", message_id="555"),
+            row(2, "다른 공지", "2026-11-01T10:00", channel="scholarship", message_id="556"))
+    channel, board = FakePins(10), FakePins(99)
+    thread = FakePins(1234)
+    assistant = bot.Assistant.__new__(bot.Assistant)
+    assistant.pins_channel = 99
+    assistant.sessions = {"1234": {"notice": "2"}}
+    assistant.pin_lock = asyncio.Lock()
+    assistant.get_channel = lambda channel_id: board
+    alert = SimpleNamespace(id=555, channel=channel)
+
+    def sync(where):
+        asyncio.run(assistant.sync_pins(where))
+
+    channel.pinned = [alert]
+    sync(channel)
+    assert store.item_actions()[1] == "track" and board.posts == ["핀 555"] and len(pushed) == 1
+    sync(channel)  # 같은 핀은 다시 표시하지 않는다.
+    assert len(store.read_jsonl(store.ACTIONS_FILE)) == 1 and len(pushed) == 1
+    channel.pinned = []
+    sync(channel)
+    assert store.item_actions()[1] == "open" and board.deleted == [901]
+    # 완료한 공지의 핀을 풀어도 완료는 그대로다.
+    channel.pinned = [alert]
+    sync(channel)
+    store.mark_item(1, "done")
+    channel.pinned = []
+    sync(channel)
+    assert store.item_actions()[1] == "done"
+    # 공지 스레드 안의 메시지를 핀해도 그 공지를 추적한다.
+    thread.pinned = [SimpleNamespace(id=777, channel=thread)]
+    sync(thread)
+    assert store.item_actions()[2] == "track"
+
+
+def test_unpin_releases_tracking_across_reposts(notices, tmp_path, monkeypatch):
+    """CLI가 재공지 번호로 추적했어도, 처음 알림의 핀을 풀면 묶음 전체의 추적이 풀린다."""
+    from ajou_assistant import bot
+    notices(row(1, "OO장학금", "2026-11-01T10:00"), row(9, "[재공지] OO장학금", "2026-11-05T10:00"))
+    store.add_repost(9, 1, "", "test")
+    store.mark_item(9, "track")
+    assert bot.track_pin(1, False) and store.item_actions()[9] == "open"
+    assert not bot.track_pin(1, False)
+
+
+def test_mark_pins_the_first_alert_of_the_group(notices, monkeypatch):
+    from ajou_assistant import cli
+    notices(row(1, "OO장학금", "2026-11-01T10:00", channel="scholarship", message_id="555"),
+            row(9, "[재공지] OO장학금", "2026-11-05T10:00"))
+    store.add_repost(9, 1, "", "test")
+    fake = FakeDiscord()
+    monkeypatch.setattr(cli, "make_clients", lambda dry_run: (None, fake))
+    monkeypatch.setattr(cli, "sync_push", lambda *args: None)
+    cli.cmd_mark(SimpleNamespace(article="9", action="track"))
+    cli.cmd_mark(SimpleNamespace(article="9", action="done"))
+    assert [payload for _, payload, _ in fake.sent] == [{"pin": "555", "on": True}, {"pin": "555", "on": False}]
+    assert store.item_actions()[9] == "done"

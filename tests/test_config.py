@@ -12,6 +12,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 def test_home_defaults_to_current_folder_and_follows_ajou_home(tmp_path, monkeypatch):
     monkeypatch.delenv("AJOU_HOME", raising=False)
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / "없음")  # 이 컴퓨터의 env 파일에 AJOU_HOME이 있어도 시험은 같게.
     monkeypatch.chdir(tmp_path)
     assert config._home() == tmp_path.resolve()
     other = tmp_path / "data"

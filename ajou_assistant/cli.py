@@ -664,7 +664,21 @@ def cmd_mark(args) -> int:
     store.mark_item(key, args.action)
     sync_push(f"auto: {key} {args.action}")
     print(f"{key}: {args.action}")
+    pin_alert(key, args.action == "track")
     return 0
+
+
+def pin_alert(key, on: bool) -> None:
+    """추적은 핀이다. 추적하면 묶음의 처음 알림을 핀해 #📌핀에 모으고, 다른 표시로 바꾸면 핀을 푼다."""
+    alert = first_alert(repost.group_ids(repost.root_of(key)))
+    if alert is None:
+        return
+    try:
+        _, discord = make_clients(False)
+        discord.pin(alert["channel"], alert["message_id"], on)
+        print("알림 핀" if on else "알림 핀 해제")
+    except (DiscordError, KeyError, OSError) as error:  # 표시는 이미 저장됐다. 핀은 덤이다.
+        print(f"핀 {'실패' if on else '해제 실패'}: {error}")
 
 
 def cmd_ignore(args) -> int:

@@ -94,6 +94,21 @@ class Discord:
             return response.json().get("id")
         raise DiscordError(429, "재시도 초과")
 
+    def pin(self, channel: str, message_id: str, on: bool = True) -> None:
+        """메시지를 핀하거나 핀을 푼다. 이미 그 상태면 아무 일도 없다."""
+        if self.dry_run:
+            print(f"[dry-run #{channel}] {'핀' if on else '핀 해제'} {message_id}")
+            return
+        target = self.channels.get(channel) or (channel if str(channel).isdigit() else None)
+        if target is None:
+            raise KeyError(f"모르는 채널: {channel}")
+        try:
+            response = self.client.request("PUT" if on else "DELETE", f"/channels/{target}/messages/pins/{message_id}")
+        except httpx.HTTPError as error:
+            raise DiscordError(0, str(error)[:200]) from error
+        if response.status_code >= 400 and not (not on and response.status_code == 404):
+            raise DiscordError(response.status_code, response.text[:200])
+
     def text(self, channel: str, message: str, tier: Tier = Tier.NOTIFY) -> None:
         for chunk in split_message(message):
             self.send(channel, {"content": chunk}, tier=tier)

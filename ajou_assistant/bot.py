@@ -209,6 +209,32 @@ def notice_for_message(message_id: int) -> dict | None:
     return next((row for row in store.recent_analysis() if row.get("message_id") == text), None)
 
 
+def pinned_notice(message, sessions: dict) -> int | str | None:
+    """핀한 메시지가 가리키는 공지 번호. 공지 알림 자체이거나 공지 스레드 안의 메시지일 때."""
+    row = notice_for_message(message.id)
+    if row:
+        return row["id"]
+    notice = (sessions.get(str(getattr(message.channel, "id", ""))) or {}).get("notice")
+    if notice is None:
+        return None
+    return int(notice) if str(notice).isdigit() else notice
+
+
+def track_pin(notice, pinned: bool) -> bool:
+    """핀은 추적이다. 핀하면 추적으로, 풀면 추적만 해제한다. 완료·독촉 끔은 건드리지 않는다. 바꿨으면 True."""
+    actions = store.item_actions()
+    if pinned:
+        if actions.get(notice) == "track":
+            return False
+        store.mark_item(notice, "track")
+        return True
+    members = repost.group_ids(repost.root_of(notice))
+    released = [key for key in members if actions.get(key) == "track"]
+    for key in released:
+        store.mark_item(key, "open")
+    return bool(released)
+
+
 def save_notice(row: dict, folder: Path, name: str = "notice") -> str:
     """공지 원문과 첨부를 내려받아 작업 폴더에 둔다. 동기 함수라 스레드 풀에서 부른다."""
     from .cli import BOARD_BY_KEY, gather
@@ -392,6 +418,11 @@ class Assistant(discord.Client):
             store.mark_item(key, action)
             # Discord는 3초 안에 응답해야 한다. git push는 그보다 오래 걸릴 수 있어 응답 뒤에 한다 (11/3 장애).
             await interaction.response.send_message("마감 독촉을 껐습니다." if action == "skip" else "완료로 표시했습니다.", ephemeral=True)
+            if interaction.message is not None and interaction.message.pinned:  # 끝난 공지는 핀 모음에서 뺀다.
+                try:
+                    await interaction.message.unpin()
+                except discord.HTTPException as error:
+                    print(f"핀 해제 실패 {key}: {error}", flush=True)
             await asyncio.to_thread(sync_push, f"auto: {key} {action}", str(ACTIONS_FILE))
             return
         message = interaction.message
@@ -560,18 +591,28 @@ class Assistant(discord.Client):
             await self.sync_pins(channel)
 
     async def sync_pins(self, channel) -> None:
-        """채널의 지금 핀 목록과 모아 둔 목록을 맞춘다. 새 핀은 #📌핀에 올리고, 풀린 핀은 지운다."""
+        """채널의 지금 핀 목록과 모아 둔 목록을 맞춘다. 새 핀은 #📌핀에 올리고, 풀린 핀은 지운다.
+
+        공지 알림이나 공지 스레드의 메시지를 핀하면 그 공지를 추적한다. 판단과 상관없이 마감 독촉이 가고
+        요약에 '추적 중'으로 남는다. 핀을 풀면 추적만 해제한다.
+        """
         board = self.get_channel(self.pins_channel)
         if board is None:
             return
+        changed = False
         async with self.pin_lock:
             state = load_json(PINS_FILE)
             pinned = [message async for message in channel.pins(limit=50, oldest_first=True)]
             current = {str(message.id) for message in pinned}
             for message in pinned:
-                if str(message.id) not in state:
+                row = state.get(str(message.id))
+                if row is None:
                     copy = await board.send(pin_summary(message), **quiet(silent=True))
-                    state[str(message.id)] = {"channel": channel.id, "copy": copy.id}
+                    row = state[str(message.id)] = {"channel": channel.id, "copy": copy.id}
+                if "notice" not in row:  # 이 기능 전에 핀한 것도 한 번 맞춘다.
+                    row["notice"] = pinned_notice(message, self.sessions)
+                    if row["notice"] is not None:
+                        changed |= track_pin(row["notice"], True)
             for key, row in list(state.items()):
                 if row["channel"] == channel.id and key not in current:
                     try:
@@ -579,7 +620,12 @@ class Assistant(discord.Client):
                     except discord.NotFound:
                         pass
                     del state[key]
+                    still = any(other.get("notice") == row.get("notice") for other in state.values())
+                    if row.get("notice") is not None and not still:
+                        changed |= track_pin(row["notice"], False)
             save_json(PINS_FILE, state)
+        if changed:
+            await asyncio.to_thread(sync_push, "auto: 핀 추적", str(ACTIONS_FILE))
 
     # ── 영어 단어 ────────────────────────────────────────────────
 
