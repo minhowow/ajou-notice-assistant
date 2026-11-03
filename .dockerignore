@@ -6,6 +6,5 @@ tests
 examples
 setup
 google
-assets
 *.md
 !README.md

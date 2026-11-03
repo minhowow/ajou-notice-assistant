@@ -1,7 +1,7 @@
 # 예시: 데이터 폴더(AJOU_HOME)와 비밀값·로그인을 사용자 홈에 두고 컨테이너에 그대로 붙인다.
 # 경로와 uid:gid를 자기 환경에 맞게 바꾼다(`id -u`, `id -g`). 시작: docker compose up -d
 x-assistant: &assistant
-  image: ghcr.io/minhowow/ajou-notice-assistant:0.3.0
+  image: ghcr.io/minhowow/ajou-notice-assistant:0.3.1
   user: "1000:1000"
   restart: unless-stopped
   environment:

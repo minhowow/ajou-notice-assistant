@@ -13,7 +13,7 @@ import httpx
 from .config import DISCORD_FILE, SetupError, load_discord, load_secrets, setting
 
 API = "https://discord.com/api/v10"
-ICON = Path(__file__).resolve().parents[1] / "assets" / "icon.png"
+ICON = Path(__file__).resolve().parent / "assets" / "icon.png"  # 패키지 안에 두어 도커 이미지·설치본에도 들어간다
 CATEGORY = setting("AJOU_DISCORD_CATEGORY", "아주대 비서")  # 서버에 이 이름의 카테고리를 먼저 만들어 둔다.
 CHANNELS = [  # (키, 이름, 설명)
     ("urgent", "🚨긴급", "7일 안에 마감되는 중요 공지. 강한 알림"),
