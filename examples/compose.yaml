@@ -13,6 +13,9 @@ x-assistant: &assistant
     AJOU_USER_NAME: 사용자
   volumes:
     - /home/me:/home/me                  # 데이터 폴더, ~/.config/ajou-assistant/env, ~/.claude 로그인
+    # git 동기화를 ssh로 하면 OpenSSH가 지금 uid의 계정 항목을 찾는다. 없으면 'No user exists for uid' 오류가 나므로 붙인다.
+    - /etc/passwd:/etc/passwd:ro
+    - /etc/group:/etc/group:ro
 
 services:
   scheduler:
