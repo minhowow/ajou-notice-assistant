@@ -12,7 +12,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from .config import ACTIONS_FILE, ANALYSIS_DIR, HEARTBEAT_DIR, NOTICES, REMINDERS_FILE, SEEN_FILE, USAGE_DIR
+from .config import ACTIONS_FILE, ANALYSIS_DIR, HEARTBEAT_DIR, NOTICES, REMINDERS_FILE, REPOSTS_FILE, SEEN_FILE, USAGE_DIR
 
 KST = timezone(timedelta(hours=9))
 
@@ -85,12 +85,61 @@ def recent_analysis(months: int = 3) -> list[dict]:
     return list(latest.values())
 
 
-def closed_items() -> set[int | str]:
-    """완료·패스로 표시한 글. 마감 독촉을 멈춘다. 마지막 표시가 우선이다."""
+def load_reposts() -> dict[int | str, dict]:
+    """재공지 → {"parent": 이 글이 되풀이한 이전 공지, "changes": 바뀐 점}. 처음 공지는 repost.root_of로 찾는다."""
+    return {row["id"]: row for row in read_jsonl(REPOSTS_FILE) if "id" in row}
+
+
+def add_repost(article_id: int | str, parent: int | str, changes: str, via: str) -> None:
+    append_jsonl(REPOSTS_FILE, {"id": article_id, "parent": parent, "changes": changes, "via": via,
+                                "at": now().isoformat(timespec="seconds")})
+
+
+RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def posted_order(row: dict) -> tuple[str, str]:
+    """게시일, 같으면 분석 시각 순. 옛 글을 다시 분석해도 새로 올라온 재공지보다 앞에 둔다."""
+    return str(row.get("date", "")), str(row.get("analyzed_at", ""))
+
+
+def notice_groups(rows: list[dict] | None = None) -> list[dict]:
+    """재공지를 처음 공지에 묶어 묶음마다 한 건을 돌려준다. 마감 독촉·요약·캘린더가 같은 공지를 두 번 다루지 않게.
+
+    날짜와 자격은 가장 늦게 올라온 글의 분석을 따른다(마감 연장을 반영). 관련도는 묶음에서 가장 높은 것을 쓴다.
+    돌려주는 행의 `root`가 처음 공지 번호, `members`가 묶음의 모든 번호다.
+    """
+    from .repost import root_of
+
+    rows = recent_analysis() if rows is None else rows
+    links = load_reposts()
+    groups: dict[int | str, dict] = {}
+    for row in sorted(rows, key=posted_order):
+        root = root_of(row["id"], links)
+        previous = groups.get(root)
+        merged = {**row, "root": root, "members": (previous["members"] if previous else set()) | {row["id"]}}
+        if previous and RANK[previous["analysis"]["relevance"]] > RANK[row["analysis"]["relevance"]]:
+            merged["analysis"] = {**row["analysis"], "relevance": previous["analysis"]["relevance"]}
+        groups[root] = merged
+    return list(groups.values())
+
+
+def item_actions() -> dict[int | str, str]:
+    """글마다 마지막 표시(done, skip, open, track)."""
     state: dict[int | str, str] = {}
     for row in read_jsonl(ACTIONS_FILE):
         state[row["id"]] = row["action"]
-    return {key for key, action in state.items() if action in ("done", "skip")}
+    return state
+
+
+def closed_items() -> set[int | str]:
+    """완료·패스로 표시한 글. 마감 독촉을 멈춘다. 마지막 표시가 우선이다."""
+    return {key for key, action in item_actions().items() if action in ("done", "skip")}
+
+
+def tracked_items() -> set[int | str]:
+    """사용자가 '계속 추적'하라고 한 글. 관련도가 보통이어도 높음처럼 마감 독촉하고 일일요약에 남긴다."""
+    return {key for key, action in item_actions().items() if action == "track"}
 
 
 def mark_item(article_id: int | str, action: str) -> None:
@@ -111,8 +160,11 @@ def add_usage(kind: str, amount: float, note: str = "") -> None:
 
 
 def month_usage(kind: str | None = None) -> float:
+    """이번 달 API 비용. 종류를 안 주면 구독으로 돈 것(-plan, 실제로 돈이 나가지 않음)은 뺀다."""
     rows = read_jsonl(USAGE_DIR / f"{now():%Y-%m}.jsonl")
-    return sum(row["usd"] for row in rows if kind is None or row["kind"] == kind)
+    if kind is None:
+        return sum(row["usd"] for row in rows if not row["kind"].endswith("-plan"))
+    return sum(row["usd"] for row in rows if row["kind"] == kind)
 
 
 def write_heartbeat(summary: dict) -> None:

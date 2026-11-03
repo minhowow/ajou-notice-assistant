@@ -1,0 +1,23 @@
+# 예시: 데이터 폴더(AJOU_HOME)와 비밀값·로그인을 사용자 홈에 두고 컨테이너에 그대로 붙인다.
+# 경로와 uid:gid를 자기 환경에 맞게 바꾼다(`id -u`, `id -g`). 시작: docker compose up -d
+x-assistant: &assistant
+  image: ghcr.io/minhowow/ajou-notice-assistant:0.3.0
+  user: "1000:1000"
+  restart: unless-stopped
+  environment:
+    HOME: /home/me
+    TZ: Asia/Seoul
+    AJOU_HOME: /home/me/notices          # auto/, outputs/, records/, CURRENT_PROFILE.md
+    # AJOU_CONFIG_DIR: /home/me/notices/config   # discord.json, boards.json, private_facts.md, prompt.md
+    # AJOU_GIT_SYNC: "1"                 # 데이터 폴더를 git으로 맞출 때
+    AJOU_USER_NAME: 사용자
+  volumes:
+    - /home/me:/home/me                  # 데이터 폴더, ~/.config/ajou-assistant/env, ~/.claude 로그인
+
+services:
+  scheduler:
+    <<: *assistant
+    command: ["ajou", "schedule"]
+  bot:
+    <<: *assistant
+    command: ["ajou-bot"]

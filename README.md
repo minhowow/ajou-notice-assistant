@@ -1,12 +1,23 @@
 # ajou-notice-assistant
 
-**English summary.** A self-hosted assistant that polls university notice boards (Ajou University's public boards by default, any CMS-style board via a JSON file), asks Claude whether each new notice matters to *you* given a profile you write, and sends only what matters to your own Discord server in four notification tiers. Fetching and scheduling are plain code; the model is called only to judge newly collected notices and to summarize your chat threads. Notice text is treated as untrusted input: the judging call has no tools and returns schema-checked JSON, and the thread bot runs with a restricted tool set. All personal data (profile, records, IDs, secrets) lives outside this repository. Korean documentation below. License: undecided.
+**English summary.** A self-hosted assistant that polls university notice boards (Ajou University's public boards by default, any CMS-style board via a JSON file), asks Claude whether each new notice matters to *you* given a profile you write, and sends only what matters to your own Discord server in four notification tiers. Fetching and scheduling are plain code; the model is called only to judge newly collected notices and to summarize your chat threads. Notice text is treated as untrusted input: the judging call has no tools and returns schema-checked JSON, and the thread bot runs with a restricted tool set. All personal data (profile, records, IDs, secrets) lives outside this repository. Runs as a Docker image (`ghcr.io/minhowow/ajou-notice-assistant`) or with uv. Korean documentation below. License: MIT.
 
 학교 공지를 모아 내 상황과 대조하고, 필요한 것만 내 Discord 서버로 알립니다. Discord 스레드에서 이어서 대화하면 Claude Code가 지원서 초안 같은 작업을 돕고, 대화에서 나온 결정·사실·할 일·일정은 기록으로 남습니다.
 
 기본 수집처는 아주대학교 공개 게시판입니다. 게시판 목록은 설정 파일로 바꿀 수 있고, 마크업이 다른 사이트는 파서를 추가하면 됩니다.
 
-> 상태: 개인용으로 쓰던 코드를 설정만 바꿔 쓸 수 있게 정리한 것입니다. 수집·판단·알림은 실제로 쓰던 흐름이고, 이 저장소로 옮긴 뒤의 설정 분리 부분은 단위 시험으로만 확인했습니다. 실제 Discord·Claude·Apps Script에 연결하는 단계는 처음 설정할 때 직접 확인해야 합니다.
+> 상태: 한 학생이 집 서버에서 매일 쓰는 코드를, 설정만 바꿔 누구나 쓸 수 있게 정리한 것입니다. 작성자도 이 저장소의 도커 이미지를 그대로 받아 씁니다(0.3.0부터). 실제 Discord·Claude·Apps Script에 연결하는 단계는 처음 설정할 때 직접 확인해야 합니다.
+
+할 수 있는 것:
+
+- **공지 판단과 알림**: 새 글을 프로필과 대조해 관련도·자격·마감·할 일을 뽑고, 네 단계 알림으로 보낸다. 교수 추천서처럼 남에게 부탁할 서류는 준비 기간을 거꾸로 세어 "부탁 시작"을 알린다.
+- **재공지 묶기**: 같은 공지가 다른 게시판이나 [재공지]로 다시 올라오면 처음 공지에 묶어 알림·독촉·캘린더를 한 번만 한다. 바뀐 점이 있으면 한 줄로, 스레드가 있으면 스레드에 알린다(`repost.py`).
+- **마감 독촉**: D-3·D-1·당일. 완료·패스 버튼이나 `ajou mark`로 끄고, `ajou mark <글> track`으로 관련도와 상관없이 계속 추적한다.
+- **스레드 대화**: 공지·대화 채널에서 스레드를 열면 Claude Code 세션 하나가 붙는다. claude.ai 로그인이 있으면 구독으로 돌고 claude.ai 커넥터(캘린더·노션)를 쓴다. 커넥터 호출은 `guard.py`가 먼저 검사한다(일정 삭제, 바깥 참석자, 노션 쓰기 차단).
+- **기록**: 대화가 끝나면 결정·사실·할 일·일정을 `records/`와 캘린더에 남긴다. 일요일 밤에는 주간 정리를 올린다(`weekly.py`).
+- **영어 단어 복습**: 붙여 넣은 단어 글을 정리해 간격 반복으로 아침·밤 퀴즈를 낸다(`english.py`).
+- **공부 노트**: 공부 채널에 받아쓰기·자료를 올리면 과목별 노트와 확인 문제를 만든다.
+- **핀 모아보기**: 어느 채널에서든 핀한 메시지를 한 채널에 모은다.
 
 ## 구조
 
@@ -128,9 +139,27 @@ uv run ajou run                        # 실제 실행
 
 옛 글도 훑고 싶으면 `uv run ajou backfill --days 30 --count`로 대상 수를 먼저 보고, `--prefilter`로 제목부터 걸러서 돌리세요.
 
-### 6. 주기 실행
+### 6. 주기 실행: 도커 (권장)
 
-수집은 매시, 요약은 하루 한 번이면 충분합니다. 예시(cron):
+이미지에는 코드, Python, Claude Code CLI, git·git-crypt·poppler만 들어 있습니다. 데이터 폴더, env 파일, Claude 로그인(`~/.claude`)은 모두 홈 폴더에 두고 컨테이너에 붙이므로, 이미지를 바꾸거나 새 서버로 옮겨도 홈 폴더만 있으면 그대로 이어집니다.
+
+같은 이미지로 서비스 두 개를 띄웁니다. `examples/compose.yaml`을 복사해 경로·uid를 고치고:
+
+```sh
+docker compose up -d                       # scheduler(수집 매시 :07, 요약 21:30, 주간 정리 일 21:00) + bot
+docker compose logs -f scheduler
+docker compose run --rm scheduler ajou google-check   # 다른 명령도 이렇게
+```
+
+`ajou schedule`은 systemd 타이머 대신 컨테이너 안에서 도는 시계입니다. 꺼져 있던 동안 놓친 차례는 켜질 때 한 번만 돌고, 처음 켤 때는 지난 차례를 건너뜁니다. 각 명령은 따로 프로세스로 돌아 한 번의 실패가 시계를 멈추지 않습니다. 컨테이너는 늘 떠 있지만 쉬는 동안 메모리 수십 MB 정도만 씁니다 [추정].
+
+스레드 봇의 Claude Code에 구독 로그인을 쓰려면 한 번 `docker compose run --rm bot claude auth login`을 실행합니다. 로그인은 붙인 홈 폴더의 `~/.claude`에 남습니다.
+
+이미지는 이 저장소의 GitHub Actions가 `main`과 `v*` 태그마다 `ghcr.io/minhowow/ajou-notice-assistant`로 만듭니다(amd64, arm64). 직접 만들려면 `docker build -t ajou-notice-assistant .`.
+
+### 6-1. 주기 실행: cron과 systemd
+
+도커 없이 쓸 때입니다. 수집은 매시, 요약은 하루 한 번이면 충분합니다. 예시(cron):
 
 ```cron
 7 * * * *   cd /path/to/ajou-notice-assistant && AJOU_HOME=$HOME/ajou-data /path/to/uv run ajou run
@@ -152,6 +181,9 @@ Restart=always
 - **Google 캘린더**: `sh setup/setup-google.sh`. Apps Script(Google Cloud 프로젝트 불필요)를 내 계정에 올려 일정을 넣습니다. 안내가 단계별로 나옵니다. 연결 확인은 `uv run ajou google-check`. 스크립트를 고친 뒤에는 `setup/update-google.sh`로 같은 주소에 새 버전을 올립니다. 다른 컴퓨터에서도 쓰려면 env 파일의 `GOOGLE_BRIDGE_URL`, `GOOGLE_BRIDGE_SECRET` 두 줄을 그 컴퓨터에 옮깁니다. 학교가 외부 스크립트를 막아 두면 연결되지 않으며, 그래도 공지 알림은 동작합니다.
 - **git 동기화와 예비 호스트**: 데이터 폴더를 git 저장소로 만들고 `AJOU_GIT_SYNC=1`을 주면 실행마다 기록을 pull/push합니다. 컴퓨터 두 대가 같은 기록을 이어 쓰고, `ajou run --standby`가 주 호스트의 기록이 `AJOU_STANDBY_HOURS`(기본 6시간) 넘게 끊겼을 때만 수집을 이어받습니다. 기록에 개인정보가 들어 있으므로 원격은 반드시 **비공개** 저장소로 두세요. 기본은 꺼져 있습니다. 예비 호스트는 주 호스트의 기록을 git으로 받아 봐야 생존 여부를 알 수 있으므로 동기화를 켠 상태에서만 쓰세요.
 - **모델과 이름**: `AJOU_MODEL`(판단 모델), `AJOU_USER_NAME`(프롬프트에서 부를 이름, 기본 "사용자"), `AJOU_SCHOOL`(프롬프트의 학교 이름, 기본 "아주대학교"). env 파일에 같은 이름으로 적어도 됩니다.
+- **설정 폴더**: `AJOU_CONFIG_DIR`(기본 `AJOU_HOME`)에 `discord.json`, `boards.json`, `private_facts.md`를 둡니다. 같은 폴더의 `prompt.md`는 스레드 대화의 시스템 프롬프트 뒤에 붙습니다. 자기 저장소만의 규칙(먼저 읽을 파일, 동아리 이름 등)을 여기에 적습니다.
+- **주간 정리**: `AJOU_WEEKLY_AREAS`(쉼표로 나눈 영역 이름, 기본 "학업,장학·진로,국제교류,영어,동아리,생활,기타"), `AJOU_DEADLINES_FILE`(함께 읽을 마감 목록, 기본 `05_deadlines.md`, 없으면 건너뜀).
+- **스레드 실행 방식**: `~/.claude/.credentials.json`에 claude.ai 로그인이 있으면 구독으로 돌고, 한도·로그인 문제면 같은 턴을 API 키로 다시 돕니다. `AJOU_THREAD_AUTH=api`로 끌 수 있습니다. 커넥터 검사가 허용할 참석자 메일은 `discord.json`의 `calendar_account`와 env의 `AJOU_OWNER_EMAILS`입니다.
 
 ## 명령
 
@@ -172,6 +204,10 @@ uv run ajou calendar-add "제목" 2026-11-08 10:00 --minutes 180
 uv run ajou calendar-sync --dry-run    # 밀린 중요 공지 일정 넣기 (확실한 것만)
 uv run ajou calendar-dedupe --dry-run  # 비서 일정이 내 일정과 같은 시각이면 비서 쪽 삭제
 uv run ajou records-apply        # 기록의 일정·참석 응답을 다시 반영
+uv run ajou --dry-run weekly     # 주간 정리 미리 보기 (화면에만, API 비용은 듦)
+uv run ajou mark 378230 track    # 관련도와 상관없이 계속 추적 (done, skip, open도 있음)
+uv run ajou link-reposts --dry-run # 이미 처리한 공지에서 재공지 찾아 묶기 (알림 없음)
+uv run ajou schedule             # run·digest·weekly 시계 (도커 기본 명령)
 uv run ajou-bot                  # 스레드 봇
 uv run pytest -q                 # 시험
 ```
@@ -236,4 +272,4 @@ uv run pytest -q                 # 시험
 
 ## 라이선스
 
-라이선스 미정. 저장소 소유자가 정하기 전까지는 사용·수정·재배포 권한이 부여되지 않은 것으로 보세요.
+MIT. `LICENSE`를 보세요.

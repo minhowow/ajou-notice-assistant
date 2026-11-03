@@ -6,6 +6,7 @@
 
 환경변수 (env 파일에 같은 이름으로 적어도 된다)
   AJOU_HOME             데이터 폴더. 기본은 현재 작업 폴더
+  AJOU_CONFIG_DIR       discord.json, boards.json, private_facts.md, prompt.md를 둘 폴더. 기본은 AJOU_HOME
   AJOU_ENV_FILE         비밀값 파일. 기본 ~/.config/ajou-assistant/env
   AJOU_STATE_DIR        잠금·대응표 폴더. 기본 ~/.cache/ajou-assistant
   AJOU_MODEL            판단에 쓸 모델
@@ -34,21 +35,25 @@ def _home() -> Path:
 
 
 HOME_DIR = _home()
+CONFIG_DIR = Path(os.environ.get("AJOU_CONFIG_DIR") or HOME_DIR).expanduser().resolve()
 AUTO = HOME_DIR / "auto"
 NOTICES = AUTO / "notices"
 SEEN_FILE = NOTICES / "seen.jsonl"
 ANALYSIS_DIR = NOTICES / "analysis"
 HEARTBEAT_DIR = AUTO / "heartbeat"
 PROFILE_FILE = HOME_DIR / "CURRENT_PROFILE.md"
-PRIVATE_FACTS_FILE = HOME_DIR / "private_facts.md"
+PRIVATE_FACTS_FILE = CONFIG_DIR / "private_facts.md"
 THREAD_DIR = HOME_DIR / "outputs" / "threads"
 ACTIONS_FILE = NOTICES / "actions.jsonl"
 REMINDERS_FILE = NOTICES / "reminders.jsonl"
+REPOSTS_FILE = NOTICES / "reposts.jsonl"
 USAGE_DIR = AUTO / "usage"
-DISCORD_FILE = HOME_DIR / "discord.json"
-BOARDS_FILE = HOME_DIR / "boards.json"
+DISCORD_FILE = CONFIG_DIR / "discord.json"
+BOARDS_FILE = CONFIG_DIR / "boards.json"
+PROMPT_FILE = CONFIG_DIR / "prompt.md"  # 스레드 대화에 덧붙일 개인 지시(선택)
 ENV_FILE = Path(os.environ.get("AJOU_ENV_FILE") or Path.home() / ".config" / "ajou-assistant" / "env").expanduser()
 STATE_DIR = Path(os.environ.get("AJOU_STATE_DIR") or Path.home() / ".cache" / "ajou-assistant").expanduser()
+SESSIONS_FILE = STATE_DIR / "threads.json"  # 스레드 → 세션·공지. 봇이 쓰고 공지 실행은 읽기만 한다.
 
 MODEL = os.environ.get("AJOU_MODEL", "claude-opus-5-5")
 USER_AGENT = "ajou-personal-notice-assistant/0.1 (student personal use)"

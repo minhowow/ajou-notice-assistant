@@ -61,7 +61,7 @@ class Discord:
         )
 
     def send(self, channel: str, payload: dict, files: list[tuple[str, bytes]] | None = None, tier: Tier = Tier.NOTIFY) -> str | None:
-        """보낸 메시지 ID를 돌려준다."""
+        """보낸 메시지 ID를 돌려준다. channel은 discord.json의 채널 이름이나 스레드 ID다."""
         payload = dict(payload)
         mentions: dict = {"parse": []}
         if tier == Tier.PING and self.owner:
@@ -73,7 +73,10 @@ class Discord:
         if self.dry_run:
             print(f"[dry-run #{channel} {tier.value}]", json.dumps(payload, ensure_ascii=False)[:1500])
             return None
-        path = f"/channels/{self.channels[channel]}/messages"
+        target = self.channels.get(channel) or (channel if str(channel).isdigit() else None)
+        if target is None:
+            raise KeyError(f"모르는 채널: {channel}")
+        path = f"/channels/{target}/messages"
         for _ in range(5):
             try:
                 if files:
@@ -135,6 +138,24 @@ def _days_left(item, today: date) -> int | None:
         return (date.fromisoformat(item.date) - today).days
     except ValueError:
         return None
+
+
+def ask_dates(analysis: Analysis, today: date) -> list[tuple[object, date]]:
+    """남에게 부탁할 서류마다 '이날까지 부탁해야 한다'는 날. 남은 마감 중 가장 이른 것에서 준비 기간을 뺀다."""
+    ends = sorted(date.fromisoformat(item.date) for item in analysis.deadlines
+                  if item.kind == "deadline" and _days_left(item, today) is not None and _days_left(item, today) >= 0)
+    if not ends:
+        return []
+    return [(prep, ends[0] - timedelta(days=max(0, prep.lead_days))) for prep in analysis.from_others]
+
+
+def format_asks(analysis: Analysis, today: date) -> str:
+    lines = []
+    for prep, ask in ask_dates(analysis, today):
+        left = (ask - today).days
+        when = "지금 바로 부탁" if left <= 0 else f"{ask.month}/{ask.day}까지 부탁 (D-{left})"
+        lines.append(f"{prep.document} ({prep.who}): {when}")
+    return "\n".join(lines)
 
 
 def route(analysis: Analysis, today: date) -> tuple[str | None, Tier]:
@@ -224,6 +245,9 @@ def build_embed(item: ListItem, detail: Detail, analysis: Analysis, notes: list[
     deadlines = format_deadlines(analysis, today)
     if deadlines:
         fields.append({"name": "일정", "value": _clip(deadlines, 1024)})
+    asks = format_asks(analysis, today)
+    if asks:
+        fields.append({"name": "🤝 남에게 부탁할 서류", "value": _clip(asks, 1024)})
     if analysis.unknowns:
         fields.append({"name": "확인 필요", "value": _clip("\n".join(analysis.unknowns), 1024)})
     if detail.attachments:
