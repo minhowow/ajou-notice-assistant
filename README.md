@@ -115,7 +115,7 @@ cp examples/boards.example.json "$AJOU_HOME/boards.json"   # 아주대 말고 �
 ### 3. Discord 준비
 
 1. [Developer Portal](https://discord.com/developers/applications)에서 애플리케이션과 봇을 만듭니다. Bot 설정에서 **Message Content Intent**를 켭니다 (스레드 대화에 필요).
-2. 봇을 내 서버에 초대합니다(OAuth2 URL의 scope는 `bot`). 코드가 쓰는 기능으로 보아 필요한 권한은 채널 보기, 메시지 보내기, 임베드 링크, 파일 첨부, 메시지 기록 보기, 공개 스레드 만들기, 스레드에서 메시지 보내기이고, `ajou style`로 채널을 만들려면 채널 관리, 서버 아이콘까지 바꾸려면 서버 관리가 필요합니다.
+2. 봇을 내 서버에 초대합니다(OAuth2 URL의 scope는 `bot`). 코드가 쓰는 기능으로 보아 필요한 권한은 채널 보기, 메시지 보내기, 임베드 링크, 파일 첨부, 메시지 기록 보기, 공개 스레드 만들기, 스레드에서 메시지 보내기이고, `ajou style`로 채널을 만들려면 채널 관리, 서버 아이콘까지 바꾸려면 서버 관리가 필요합니다. `ajou mark <글> track`이 알림을 핀하고 완료 버튼이 핀을 풀려면 메시지 고정(Pin Messages) 권한이 필요합니다. Discord는 2026년부터 메시지 관리 권한만으로는 핀을 허용하지 않습니다(11/3 VM에서 403 확인).
 3. Discord 설정에서 개발자 모드를 켜고, 서버 ID와 내 사용자 ID를 복사해 `$AJOU_HOME/discord.json`의 `guild_id`, `owner_id`에 넣습니다.
 4. 서버에 이름이 `아주대 비서`인 카테고리를 만듭니다 (다른 이름이면 `AJOU_DISCORD_CATEGORY`로 지정).
 5. 채널 ID는 비워 둔 채 `uv run ajou style`을 실행하면 채널을 만들고 `discord.json`에 ID를 채워 줍니다. 이미 있는 채널을 쓰려면 ID를 직접 넣으세요.
