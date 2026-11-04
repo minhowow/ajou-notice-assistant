@@ -21,8 +21,10 @@ REFLECTIONS_DIR = HOME_DIR / "records" / "reflections"
 DELAY = timedelta(minutes=30)
 WINDOW = timedelta(hours=36)
 MAX_PER_RUN = 3
+# 11/4: 사용자가 직접 넣은 'OO 톡톡톡 Apple 시애틀 (Zoom)'이 빠져 토크·톡·Zoom을 더했다.
 KEYWORDS = ("강연", "특강", "세미나", "설명회", "간담회", "면담", "면접", "인터뷰", "미팅", "회의", "멘토", "멘토링",
-            "대회", "페스티벌", "박람회", "워크숍", "워크샵", "talk", "meetup", "interview")
+            "대회", "페스티벌", "박람회", "워크숍", "워크샵", "포럼", "컨퍼런스", "콘퍼런스", "토크", "톡", "발표",
+            "오리엔테이션", "zoom", "줌", "talk", "meetup", "interview")
 SKIP_PREFIXES = ("[마감]", "[접수 시작]", "[면담 후보]")
 
 

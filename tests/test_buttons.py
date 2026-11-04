@@ -157,9 +157,12 @@ def test_followup_picks_talks_and_meetings_not_classes_or_tasks():
         event("진로 특강", "2026-11-04T19:00:00+09:00", "2026-11-04T20:45:00+09:00", status="declined"),
         event("취업 특강", "2026-11-04T20:00:00+09:00", "2026-11-04T20:50:00+09:00"),  # 끝난 지 30분이 안 됐다.
         event("인턴 면접", "2026-11-02T10:00:00+09:00", "2026-11-02T11:00:00+09:00"),  # 36시간이 지났다.
+        event("글로벌 취·창업 톡톡톡 Apple 시애틀 (Zoom)", "2026-11-03T19:00:00+09:00", "2026-11-03T20:30:00+09:00"),
     ]
-    assert [row["title"] for row in followup.due(rows, now, set())] == ["릴레이 글로벌 [미국(시애틀)-Apple]", "이석원 교수님 면담"]
-    assert [row["title"] for row in followup.due(rows, now, {"릴레이 글로벌 [미국(시애틀)-Apple]"})] == ["이석원 교수님 면담"]
+    assert [row["title"] for row in followup.due(rows, now, set())] == [
+        "릴레이 글로벌 [미국(시애틀)-Apple]", "글로벌 취·창업 톡톡톡 Apple 시애틀 (Zoom)", "이석원 교수님 면담"]
+    asked = {"릴레이 글로벌 [미국(시애틀)-Apple]", "글로벌 취·창업 톡톡톡 Apple 시애틀 (Zoom)"}
+    assert [row["title"] for row in followup.due(rows, now, asked)] == ["이석원 교수님 면담"]
     assert followup.quiet_hours(datetime(2026, 11, 4, 23, 30)) and not followup.quiet_hours(datetime(2026, 11, 4, 9, 0))
     assert followup.prompt(rows[0], now).startswith("✍️ 어제 19:00 「릴레이 글로벌")
 
