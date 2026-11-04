@@ -153,6 +153,9 @@ def turn_environment(plan: bool) -> dict[str, str]:
     if os.environ.get("DISABLE_AUTOUPDATER"):  # 도커 이미지는 판을 고정한다. 홈 폴더에 새 판을 깔지 않게.
         environment["DISABLE_AUTOUPDATER"] = os.environ["DISABLE_AUTOUPDATER"]
     if plan:
+        # claude.ai 커넥터(캘린더 등)는 턴마다 새로 붙는다. 11/4 20:10 한 턴에서 캘린더가 빠졌고 바로 뒤에는 붙었다.
+        # 연결이 늦은 순간에 도구가 통째로 빠지지 않게 기다리는 시간을 늘린다(기본 몇 초).
+        environment["MCP_TIMEOUT"] = os.environ.get("MCP_TIMEOUT", "30000")
         secrets = load_secrets()
         owners = {load_discord().get("calendar_account", ""), *secrets.get("AJOU_OWNER_EMAILS", "").split(",")}
         environment["AJOU_OWNER_EMAILS"] = ",".join(sorted(value.strip() for value in owners if value.strip()))

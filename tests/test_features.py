@@ -49,6 +49,7 @@ def test_plan_mode_adds_connectors_and_hook_but_not_api_key(monkeypatch):
     environment = bot.turn_environment(True)
     assert "ANTHROPIC_API_KEY" not in environment
     assert environment["AJOU_OWNER_EMAILS"] == "me@ajou.ac.kr,me@gmail.com"
+    assert int(environment["MCP_TIMEOUT"]) >= 30000 and "MCP_TIMEOUT" not in bot.turn_environment(False)
     assert bot.turn_environment(False)["ANTHROPIC_API_KEY"] == "k"
 
 
