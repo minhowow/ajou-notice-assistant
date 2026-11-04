@@ -5,6 +5,7 @@ setup/setup-google.sh가 배포 주소와 비밀값을 env에 넣는다. 캘린�
 """
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
@@ -44,8 +45,16 @@ def call(action: str, **params) -> dict | list:
 
 
 @lru_cache(maxsize=1)
+def _ping() -> dict:
+    return dict(call("ping"))
+
+
 def version() -> int:
-    return int(call("ping").get("version", 1))
+    return int(_ping().get("version", 1))
+
+
+def calendar_id() -> str:
+    return str(_ping().get("calendar", ""))
 
 
 def event_times(day: str, clock: str, minutes: int) -> tuple[str, str, bool]:
@@ -81,6 +90,26 @@ def remove_event(event_id: str) -> dict:
     return call("calendar_remove", id=event_id)
 
 
+def event_link(row: dict, day: str = "") -> str:
+    """일정 하나를 여는 주소. 스크립트가 htmlLink를 주지 않았으면 일정 id와 캘린더 id로 만든다(eid).
+
+    그날 화면 주소는 마지막 수단이다. 사용자는 날짜가 아니라 그 일정을 보고 싶어 한다(11/4).
+    """
+    if row.get("link") and "/r/day/" not in row["link"]:
+        return row["link"]
+    if row.get("id"):
+        try:
+            raw = f"{str(row['id']).split('@')[0]} {calendar_id()}".encode()
+            return "https://www.google.com/calendar/event?eid=" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        except (BridgeError, httpx.HTTPError, KeyError):
+            pass
+    return day_link(day) if day else ""
+
+
+def find_event(rows: list[dict], key: str) -> dict | None:
+    return next((row for row in rows if row.get("key") == key), None)
+
+
 def day_link(day: str) -> str:
     """일정 주소를 모를 때 쓰는 그날 화면 주소."""
     return f"https://calendar.google.com/calendar/r/day/{day.replace('-', '/')}"
@@ -94,9 +123,7 @@ def add_event(key: str, title: str, day: str, clock: str, notes: str, minutes: i
                   reminders=reminders if reminders is not None else DEADLINE_REMINDERS,
                   rsvp=rsvp and version() >= 2)
     event = result.setdefault("event", {})
-    event.setdefault("link", "")
-    if not event["link"]:
-        event["link"] = day_link(day)
+    event["link"] = event_link(event, day)
     return result
 
 

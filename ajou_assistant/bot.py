@@ -40,17 +40,19 @@ from pathlib import Path
 import anthropic
 import discord
 
-from . import english, guard, record, repost, store
+from . import english, followup, guard, record, repost, store
 from .config import (
     ACTIONS_FILE, HOME_DIR, MODEL, PROMPT_FILE, SESSIONS_FILE, STATE_DIR, THREAD_DIR, load_discord, load_secrets, setting,
     user_name,
 )
-from .notify import split_message
+from .notify import PIN_LABEL, UNPIN_LABEL, _clip, split_message
 from .scrape import Fetcher, ListItem
 from .style import apply_style
 from .sync import sync_push
 
 PINS_FILE = STATE_DIR / "pins.json"
+FOLLOWUPS_FILE = STATE_DIR / "followups.json"
+FOLLOWUP_CHECK_SECONDS = 600
 QUIZ_FILE = STATE_DIR / "english_quizzes.json"
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 GUARD_FILE = Path(guard.__file__).resolve()
@@ -352,6 +354,7 @@ class Assistant(discord.Client):
         self.loop.create_task(self.style_until_done())
         self.loop.create_task(self.record_loop())
         self.loop.create_task(self.english_loop())
+        self.loop.create_task(self.followup_loop())
 
     async def on_ready(self) -> None:
         print(f"연결됨: {self.user} 서버 {len(self.guilds)}개, 스레드 실행: {'구독' if plan_login() else 'API 키'}", flush=True)
@@ -413,16 +416,19 @@ class Assistant(discord.Client):
             missed = (interaction.data or {}).get("values", []) if action == "eng-miss" else []
             await self.answer_quiz(interaction, article, missed)
             return
+        if action == "cal":
+            await self.add_calendar(interaction, article)
+            return
         key = int(article) if article.isdigit() else article
+        if action == "pin":
+            await self.toggle_pin(interaction, key)
+            return
         if action in ("done", "skip"):
             store.mark_item(key, action)
             # Discord는 3초 안에 응답해야 한다. git push는 그보다 오래 걸릴 수 있어 응답 뒤에 한다 (11/3 장애).
             await interaction.response.send_message("마감 독촉을 껐습니다." if action == "skip" else "완료로 표시했습니다.", ephemeral=True)
-            if interaction.message is not None and interaction.message.pinned:  # 끝난 공지는 핀 모음에서 뺀다.
-                try:
-                    await interaction.message.unpin()
-                except discord.HTTPException as error:
-                    print(f"핀 해제 실패 {key}: {error}", flush=True)
+            if interaction.message is not None:  # 끝난 공지는 핀 모음에서 뺀다.
+                await self.set_pin(interaction.message, key, False, release=False)
             await asyncio.to_thread(sync_push, f"auto: {key} {action}", str(ACTIONS_FILE))
             return
         message = interaction.message
@@ -453,6 +459,9 @@ class Assistant(discord.Client):
                     async with self.lock_for(channel.id):
                         if not await self.flush_thread(str(channel.id), channel):
                             await channel.send("새로 정리할 대화가 없습니다.", **quiet(silent=True))
+                    return
+                if self.sessions.get(str(channel.id), {}).get("mode") == "reflection":
+                    await self.reflect(channel, message)
                     return
                 await self.converse(channel, message)
             return
@@ -582,6 +591,162 @@ class Assistant(discord.Client):
                 continue
             await thread.send(file=discord.File(path), **quiet())
 
+    # ── 알림 버튼: 📌 핀, 📅 캘린더 ─────────────────────────────
+
+    async def edit_components(self, message: discord.Message, rows: list[dict]) -> None:
+        """알림 버튼만 바꾼다. 알림은 CLI가 REST로 보낸 것이라 버튼을 dict 그대로 다시 보낸다."""
+        from discord.http import Route
+        await self.http.request(Route("PATCH", "/channels/{channel_id}/messages/{message_id}",
+                                      channel_id=message.channel.id, message_id=message.id), json={"components": rows})
+
+    @staticmethod
+    def swap_button(message: discord.Message, custom_id: str, new: dict) -> list[dict]:
+        rows = [row.to_dict() for row in message.components]
+        for row in rows:
+            row["components"] = [new if button.get("custom_id") == custom_id else button for button in row.get("components", [])]
+        return rows
+
+    @staticmethod
+    def button_label(message: discord.Message, custom_id: str) -> str:
+        for row in message.components:
+            for button in getattr(row, "children", []):
+                if getattr(button, "custom_id", None) == custom_id:
+                    return button.label or ""
+        return ""
+
+    async def set_pin(self, message: discord.Message, notice, on: bool, release: bool = True) -> str:
+        """핀은 추적이다. Discord 고정이 되면 고정하고(#📌핀은 sync_pins가 맞춘다), 봇에 고정 권한이 없으면
+        #📌핀에 직접 모은다. 끄면 고정과 모음에서 빼고, release면 추적도 푼다(완료·패스는 표시를 지킨다)."""
+        board = self.get_channel(self.pins_channel)
+        note = ""
+        if on:
+            try:
+                if not message.pinned:
+                    await message.pin()
+            except discord.HTTPException as error:
+                print(f"고정 실패, #📌핀에 직접 모음: {error}", flush=True)
+                async with self.pin_lock:
+                    state = load_json(PINS_FILE)
+                    if str(message.id) not in state and board is not None:
+                        copy = await board.send(pin_summary(message), **quiet(silent=True))
+                        state[str(message.id)] = {"channel": message.channel.id, "copy": copy.id, "notice": notice, "manual": True}
+                        save_json(PINS_FILE, state)
+                note = " (봇에 메시지 고정 권한이 없어 #📌핀에만 모았습니다)"
+            changed = track_pin(notice, True)
+        else:
+            if message.pinned:
+                try:
+                    await message.unpin()
+                except discord.HTTPException as error:
+                    print(f"고정 해제 실패 {notice}: {error}", flush=True)
+            async with self.pin_lock:
+                state = load_json(PINS_FILE)
+                row = state.get(str(message.id))
+                if row and row.get("manual"):
+                    if board is not None:
+                        try:
+                            await board.get_partial_message(row["copy"]).delete()
+                        except discord.HTTPException:
+                            pass
+                    del state[str(message.id)]
+                    save_json(PINS_FILE, state)
+            changed = track_pin(notice, False) if release else False
+        if changed:
+            await asyncio.to_thread(sync_push, "auto: 핀 추적", str(ACTIONS_FILE))
+        return note
+
+    async def toggle_pin(self, interaction: discord.Interaction, key) -> None:
+        message = interaction.message
+        custom = f"ajou:pin:{key}"
+        on = self.button_label(message, custom) != UNPIN_LABEL
+        await interaction.response.defer()
+        note = await self.set_pin(message, key, on)
+        try:
+            await self.edit_components(message, self.swap_button(message, custom, {
+                "type": 2, "style": 1 if on else 2, "label": UNPIN_LABEL if on else PIN_LABEL, "custom_id": custom}))
+        except discord.HTTPException as error:
+            print(f"버튼 바꾸기 실패 {key}: {error}", flush=True)
+        text = "핀했습니다. 마감까지 추적하고 #📌핀에 모읍니다." if on else "핀을 풀었습니다. 추적도 멈췄습니다."
+        await interaction.followup.send(text + note, ephemeral=True)
+
+    async def add_calendar(self, interaction: discord.Interaction, target: str) -> None:
+        """📅 버튼: 그 날짜를 캘린더에 넣고, 버튼을 그 일정으로 가는 ✅ 버튼으로 바꾼다."""
+        from .cli import calendar_entry
+        from .triage import Analysis
+        article, _, index = target.rpartition(":")
+        message = interaction.message
+        await interaction.response.defer()
+        row = notice_row(article)
+        try:
+            deadline = Analysis.model_validate(row["analysis"]).deadlines[int(index)]
+        except (TypeError, KeyError, IndexError, ValueError):
+            await interaction.followup.send("이 공지의 날짜를 찾지 못했습니다.", ephemeral=True)
+            return
+        key = int(article) if article.isdigit() else article
+        try:
+            link = await asyncio.to_thread(calendar_entry, row["title"], row["url"], deadline, repost.root_of(key))
+        except Exception as error:
+            print(traceback.format_exc(), flush=True)
+            await interaction.followup.send(f"캘린더에 넣지 못했습니다: {str(error)[:150]}", ephemeral=True)
+            return
+        custom = f"ajou:cal:{target}"
+        try:
+            await self.edit_components(message, self.swap_button(message, custom, {
+                "type": 2, "style": 5, "label": _clip(f"✅ 캘린더: {deadline.label}", 40), "url": link[:512]}))
+        except discord.HTTPException as error:
+            print(f"버튼 바꾸기 실패 {target}: {error}", flush=True)
+        await interaction.followup.send(f"캘린더에 넣었습니다: {deadline.date} {deadline.time} {deadline.label}".strip(), ephemeral=True)
+
+    # ── 일정 뒤 기록 요청 ────────────────────────────────────────
+
+    async def followup_loop(self) -> None:
+        """강연·면담처럼 남길 만한 일정이 끝나면 스레드를 열어 기록을 청한다."""
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await self.ask_followups()
+            except Exception:
+                print(traceback.format_exc(), flush=True)
+            await asyncio.sleep(FOLLOWUP_CHECK_SECONDS)
+
+    async def ask_followups(self) -> None:
+        from . import google_bridge
+        channel = self.get_channel(self.chat_channel)
+        now = store.now()
+        if channel is None or followup.quiet_hours(now) or not google_bridge.configured():
+            return
+        first = (now - followup.WINDOW).date().isoformat()
+        rows = await asyncio.to_thread(google_bridge.list_events, first, now.date().isoformat())
+        asked = load_json(FOLLOWUPS_FILE)
+        for row in followup.due(rows, now, set(asked)):
+            message = await channel.send(followup.prompt(row, now), **quiet())
+            thread = await self.open_thread(message, followup.thread_title(row), None, mode="reflection")
+            self.sessions[str(thread.id)]["event"] = {name: row.get(name, "") for name in ("id", "title", "start", "end")}
+            save_sessions(self.sessions)
+            asked[str(row["id"])] = {"at": now.isoformat(timespec="seconds"), "thread": thread.id, "title": row.get("title", "")}
+            save_json(FOLLOWUPS_FILE, asked)
+
+    async def reflect(self, thread: discord.Thread, message: discord.Message) -> None:
+        """기록 요청 스레드에 쓴 글은 AI 없이 그대로 남긴다. 할 일·사실은 대화가 쉬면 기록 단계가 뽑는다."""
+        text = message_text(message).strip()
+        if not text:
+            return
+        key = str(thread.id)
+        state = self.sessions.setdefault(key, {"title": thread.name, "mode": "reflection"})
+        folder = THREAD_DIR / key
+        folder.mkdir(parents=True, exist_ok=True)
+        now = store.now()
+        record.log_turn(folder, "나", text, now)
+        path = followup.save(state.get("event") or {"title": thread.name.removeprefix("✍️ ")}, text, now)
+        first = not state.get("saved")
+        state.update(last=now.isoformat(timespec="seconds"), title=thread.name, saved=str(path.relative_to(HOME_DIR)))
+        save_sessions(self.sessions)
+        reply = f"기록했어요: `{path.relative_to(HOME_DIR)}`"
+        if first:
+            reply += "\n더 떠오르면 이어서 써 주세요. 30분쯤 조용하면 할 일과 연락할 사람은 따로 정리해 둡니다."
+        await thread.send(reply, **quiet(silent=True))
+        await asyncio.to_thread(sync_push, f"auto: 기록 {thread.name[:40]}", str(path), str(folder))
+
     # ── 핀 모아보기 ──────────────────────────────────────────────
 
     async def on_guild_channel_pins_update(self, channel, last_pin) -> None:
@@ -614,6 +779,8 @@ class Assistant(discord.Client):
                     if row["notice"] is not None:
                         changed |= track_pin(row["notice"], True)
             for key, row in list(state.items()):
+                if row.get("manual"):  # 📌 버튼으로 모은 것은 Discord 고정이 아니라서 여기서 지우지 않는다.
+                    continue
                 if row["channel"] == channel.id and key not in current:
                     try:
                         await board.get_partial_message(row["copy"]).delete()

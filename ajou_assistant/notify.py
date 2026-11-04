@@ -206,20 +206,26 @@ def calendar_url(title: str, day: str, clock: str, url: str, account: str = "", 
     return link if len(link) <= 512 else None
 
 
+PIN_LABEL = "📌 핀"
+UNPIN_LABEL = "📌 핀 해제"
+
+
 def calendar_key(deadline) -> str:
     return f"{deadline.kind}:{deadline.date}:{deadline.label}"
 
 
 def build_components(item: ListItem, analysis: Analysis, today: date, account: str = "",
-                     calendar_links: dict[str, str] | None = None) -> list[dict]:
-    """원문·캘린더는 주소 버튼, 대화·완료·패스는 봇이 받는 버튼이다.
+                     calendar_links: dict[str, str] | None = None, can_add: bool = False) -> list[dict]:
+    """원문·캘린더 일정은 주소 버튼, 나머지는 봇이 받는 버튼이다.
 
-    비서가 이미 캘린더에 넣은 날짜는 그 일정으로 가는 버튼(✅)을, 넣지 않은 날짜는 사용자가 저장할 수
-    있는 '일정 추가' 화면 버튼(📅)을 단다.
+    비서가 이미 캘린더에 넣은 날짜는 그 일정으로 가는 버튼(✅)이다. 넣지 않은 날짜는 캘린더가 연결돼 있으면
+    누르면 봇이 넣고 ✅ 버튼으로 바뀌는 버튼(📅)이고, 연결이 없으면 '일정 추가' 화면을 여는 주소 버튼이다.
+    📌 핀은 공지를 마감까지 추적하고 #📌핀에 모은다.
     """
     calendar_links = calendar_links or {}
+    key = str(item.article_id)
     links: list[dict] = [{"type": 2, "style": 5, "label": "원문", "url": item.url[:512]}]
-    for deadline in analysis.deadlines:
+    for index, deadline in enumerate(analysis.deadlines):
         days = _days_left(deadline, today)
         if days is None or days < 0 or len(links) >= 5:
             continue
@@ -229,12 +235,16 @@ def build_components(item: ListItem, analysis: Analysis, today: date, account: s
             continue
         if deadline.kind == "start" or len(links) >= 4:
             continue
+        if can_add:
+            links.append({"type": 2, "style": 2, "label": _clip(f"📅 캘린더에 넣기: {deadline.label}", 40),
+                          "custom_id": f"ajou:cal:{key}:{index}"[:100]})
+            continue
         link = calendar_url(f"[{'마감' if deadline.kind == 'deadline' else '일정'}] {deadline.label}", deadline.date, deadline.time, item.url, account)
         if link:
             links.append({"type": 2, "style": 5, "label": _clip(f"📅 {deadline.label}", 40), "url": link})
-    key = str(item.article_id)
     actions = [
         {"type": 2, "style": 1, "label": "💬 대화", "custom_id": f"ajou:thread:{key}"[:100]},
+        {"type": 2, "style": 2, "label": PIN_LABEL, "custom_id": f"ajou:pin:{key}"[:100]},
         {"type": 2, "style": 3, "label": "완료", "custom_id": f"ajou:done:{key}"[:100]},
         {"type": 2, "style": 2, "label": "패스", "custom_id": f"ajou:skip:{key}"[:100]},
     ]

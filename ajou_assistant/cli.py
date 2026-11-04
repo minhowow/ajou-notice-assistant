@@ -39,7 +39,6 @@ from .config import (
     BOARDS, HEARTBEAT_DIR, LIST_PAGE_SIZE, SESSIONS_FILE, STATE_DIR, Board, SetupError, load_discord, load_secrets, setting,
 )
 from .extract import Extraction, extract_file, prepare_image
-from .google_bridge import day_link
 from .notify import (
     SUPPRESS_EMBEDS, Discord, DiscordError, Tier, _clip, ask_dates, build_components, build_embed, calendar_key, route,
     upload_images,
@@ -206,7 +205,7 @@ def deliver(discord: Discord, channel: str, tier: Tier, item: ListItem, detail: 
     account = load_discord().get("calendar_account", "")
     payload = {
         "embeds": [build_embed(item, detail, analysis, notes, failures, today, changed)],
-        "components": build_components(item, analysis, today, account, calendar_links),
+        "components": build_components(item, analysis, today, account, calendar_links, can_add=calendar_ready()),
     }
     try:
         return discord.send(channel, payload, upload_images(originals), tier)
@@ -447,10 +446,10 @@ def send_reminders(discord: Discord, today: date) -> int:
                 continue
             label = "오늘 마감" if left == 0 else f"D-{left}"
             item = ListItem(row["id"], row["board"], "", row["title"], "", "", row.get("date", ""), link=row["url"])
-            in_calendar = {calendar_key(d): day_link(d.date) for d in calendar_dates(analysis, today)} if google_ready else {}
+            in_calendar = calendar_links_for(group["root"], analysis, today) if google_ready else {}
             discord.send("urgent", {
                 "content": f"⏰ **{label}** {row['title'][:120]}\n{deadline.label}: {deadline.date} {deadline.time}".strip(),
-                "components": build_components(item, analysis, today, account, in_calendar),
+                "components": build_components(item, analysis, today, account, in_calendar, can_add=google_ready),
             }, tier=Tier.PING)
             if not discord.dry_run:
                 store.mark_reminded(key)
@@ -792,29 +791,54 @@ def calendar_ready() -> bool:
         return False
 
 
-def add_to_calendar(item: ListItem, analysis: Analysis, today: date, group=None) -> dict[str, str]:
-    """공지 날짜를 학교 캘린더에 넣고 {날짜 key: 일정 주소}를 돌려준다. 실패해도 알림은 막지 않는다.
+def calendar_entry(title: str, url: str, deadline, group) -> str:
+    """공지 날짜 하나를 캘린더에 넣고 그 일정 주소를 돌려준다.
 
     일정 key는 묶음의 처음 공지 번호(group)로 만든다. 재공지가 같은 날짜를 또 넣지 않는다.
+    같은 시각에 사용자가 직접 넣은 일정이 있으면 새로 만들지 않고 그 일정을 가리킨다.
     """
+    from . import google_bridge
+    key = f"notice:{group}:{deadline.kind}:{deadline.date}"
+    minutes = 60 if deadline.kind == "event" else 30
+    reminders = google_bridge.EVENT_REMINDERS if deadline.kind == "event" else google_bridge.DEADLINE_REMINDERS
+    same = already_in_calendar(deadline.date, deadline.time, google_bridge.list_events(deadline.date, deadline.date))
+    if same and same.get("key") != key:
+        return google_bridge.event_link(same, deadline.date)
+    result = google_bridge.add_event(key, f"[{CALENDAR_PREFIX[deadline.kind]}] {deadline.label}"[:80],
+                                     deadline.date, deadline.time, f"{title}\n{url}\n\n아주대 비서가 공지에서 넣은 일정입니다.",
+                                     minutes=minutes, reminders=reminders)
+    return result["event"]["link"]
+
+
+def calendar_links_for(group, analysis: Analysis, today: date) -> dict[str, str]:
+    """이미 캘린더에 있는 공지 날짜의 {날짜 key: 일정 주소}. 독촉 알림의 ✅ 버튼이 그날 화면이 아니라 일정을 가리키게 한다."""
+    from . import google_bridge
+    links: dict[str, str] = {}
+    for deadline in analysis.deadlines:
+        if deadline.date < today.isoformat():
+            continue
+        try:
+            rows = google_bridge.list_events(deadline.date, deadline.date)
+        except (google_bridge.BridgeError, httpx.HTTPError, ValueError) as error:
+            print(f"캘린더 확인 실패 {group}: {error}")
+            return links
+        found = google_bridge.find_event(rows, f"notice:{group}:{deadline.kind}:{deadline.date}") \
+            or already_in_calendar(deadline.date, deadline.time, rows)
+        if found:
+            links[calendar_key(deadline)] = google_bridge.event_link(found, deadline.date)
+    return links
+
+
+def add_to_calendar(item: ListItem, analysis: Analysis, today: date, group=None) -> dict[str, str]:
+    """공지 날짜를 학교 캘린더에 넣고 {날짜 key: 일정 주소}를 돌려준다. 실패해도 알림은 막지 않는다."""
     from . import google_bridge
     links: dict[str, str] = {}
     # 1판 스크립트는 참석 응답을 못 넣는다. 응답 없는 일정이 쌓이지 않게 2판부터 자동으로 넣는다.
     if not calendar_ready():
         return links
     for deadline in calendar_dates(analysis, today):
-        key = f"notice:{item.article_id if group is None else group}:{deadline.kind}:{deadline.date}"
-        minutes = 60 if deadline.kind == "event" else 30
-        reminders = google_bridge.EVENT_REMINDERS if deadline.kind == "event" else google_bridge.DEADLINE_REMINDERS
         try:
-            same = already_in_calendar(deadline.date, deadline.time, google_bridge.list_events(deadline.date, deadline.date))
-            if same and same.get("key") != key:
-                links[calendar_key(deadline)] = same.get("link") or day_link(deadline.date)
-                continue
-            result = google_bridge.add_event(key, f"[{CALENDAR_PREFIX[deadline.kind]}] {deadline.label}"[:80],
-                                             deadline.date, deadline.time, f"{item.title}\n{item.url}\n\n아주대 비서가 공지에서 넣은 일정입니다.",
-                                             minutes=minutes, reminders=reminders)
-            links[calendar_key(deadline)] = result["event"]["link"]
+            links[calendar_key(deadline)] = calendar_entry(item.title, item.url, deadline, item.article_id if group is None else group)
         except (google_bridge.BridgeError, httpx.HTTPError, ValueError, KeyError) as error:
             print(f"캘린더 등록 실패 {item.article_id}: {error}")
     return links
