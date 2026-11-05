@@ -167,6 +167,19 @@ def test_followup_picks_talks_and_meetings_not_classes_or_tasks():
     assert followup.prompt(rows[0], now).startswith("✍️ 어제 19:00 「릴레이 글로벌")
 
 
+def test_followup_skips_tentative_holds():
+    """11/4 점검: '[면담 후보]'만 건너뛰어 '[면접 후보]'·'[미정·AIWS]' 같은 가안 일정이 빠져 있었다."""
+    now = datetime(2026, 11, 10, 21, 0, tzinfo=KST)
+    start, end = "2026-11-10T15:00:00+09:00", "2026-11-10T15:30:00+09:00"
+    for title in ("[면접 후보] AIWS 버디", "[미정·AIWS] 버디 면접", "[면담 후보] 교수님", " [후보] 인터뷰"):
+        assert not followup.worth(event(title, start, end)), title
+        assert not followup.worth(event(title, start, end, key="thread:1", status="accepted")), title
+    # 대괄호가 첫머리가 아니거나 다른 말이면 평소대로 고른다.
+    assert followup.worth(event("AIWS 버디 면접", start, end))
+    assert followup.worth(event("면접 [후보 확정 뒤]", start, end))
+    assert followup.worth(event("[AIWS] 버디 면접", start, end))
+
+
 def test_reflection_thread_keeps_words_verbatim(tmp_path, monkeypatch):
     from ajou_assistant import bot
     monkeypatch.setattr(followup, "REFLECTIONS_DIR", tmp_path / "records" / "reflections")

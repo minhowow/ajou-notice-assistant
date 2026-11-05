@@ -6,7 +6,8 @@
 
 - 비서가 넣은 일정은 사용자가 캘린더에서 '참석'으로 답한 것만
 - 사용자가 직접 넣은 일정은 제목에 강연·면담 같은 말이 있는 것만
-- 종일 일정, 불참, [마감]·[접수 시작]·[면담 후보] 같은 할 일 표시는 묻지 않는다
+- 종일 일정, 불참, [마감]·[접수 시작] 같은 할 일 표시, [면접 후보]·[미정·AIWS]처럼 첫 대괄호에 '후보'·'미정'이 든
+  가안 일정은 묻지 않는다
 """
 from __future__ import annotations
 
@@ -25,7 +26,17 @@ MAX_PER_RUN = 3
 KEYWORDS = ("강연", "특강", "세미나", "설명회", "간담회", "면담", "면접", "인터뷰", "미팅", "회의", "멘토", "멘토링",
             "대회", "페스티벌", "박람회", "워크숍", "워크샵", "포럼", "컨퍼런스", "콘퍼런스", "토크", "톡", "발표",
             "오리엔테이션", "zoom", "줌", "talk", "meetup", "interview")
-SKIP_PREFIXES = ("[마감]", "[접수 시작]", "[면담 후보]")
+SKIP_PREFIXES = ("[마감]", "[접수 시작]")
+# 11/4 점검: '[면담 후보]'만 건너뛰어 '[면접 후보]'·'[미정·AIWS]' 같은 가안 일정이 빠져 있었다. 이름을 늘어놓지 않고
+# 첫 대괄호 안의 말로 판단한다.
+TENTATIVE_WORDS = ("후보", "미정")
+FIRST_BRACKET = re.compile(r"\[([^\]]*)\]")
+
+
+def tentative(title: str) -> bool:
+    """제목이 [..후보..]·[..미정..]으로 시작하는 가안 일정인가."""
+    match = FIRST_BRACKET.match(title.strip())
+    return bool(match) and any(word in match.group(1) for word in TENTATIVE_WORDS)
 
 
 def _moment(value: str) -> datetime | None:
@@ -39,7 +50,7 @@ def _moment(value: str) -> datetime | None:
 def worth(row: dict) -> bool:
     """끝난 뒤 기록을 청할 만한 일정인가."""
     title = str(row.get("title", "")).strip()
-    if row.get("allDay") or row.get("status") == "declined" or title.startswith(SKIP_PREFIXES):
+    if row.get("allDay") or row.get("status") == "declined" or title.startswith(SKIP_PREFIXES) or tentative(title):
         return False
     if row.get("status") == "accepted":
         return True

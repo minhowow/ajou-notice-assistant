@@ -327,6 +327,24 @@ def test_bot_tools_exclude_shell_and_repo_secrets():
     assert "Write(outputs/threads/1/**)" in allowed
 
 
+def test_bot_cannot_search_outside_the_data_folder(monkeypatch):
+    """11/4 점검: 경로 없는 Glob·Grep 허용으로 스레드가 홈의 봇 토큰·API 키·SSH 키를 읽을 수 있었다."""
+    from ajou_assistant import bot
+    monkeypatch.setattr(bot, "load_secrets", lambda: {"ANTHROPIC_API_KEY": "k"})
+    monkeypatch.setattr(bot, "load_discord", lambda: {})
+    for plan in (False, True):
+        command = bot.claude_command("outputs/threads/1", None, plan, "study")
+        allowed = command[command.index("--allowedTools") + 1].split()
+        denied = command[command.index("--disallowedTools") + 1].split()
+        assert not {"Glob", "Grep", "Read"} & set(allowed)  # 경로 없는 읽기 도구는 허용 목록에 두지 않는다.
+        for folder in ("~/.config", "~/.ssh", "~/.claude", "~/.cache"):
+            assert f"Read({folder}/**)" in denied
+        for rule in denied:
+            if rule.startswith("Read("):
+                # 슬래시 하나로 시작하는 절대경로는 상대경로로 읽혀 막지 못한다.
+                assert rule[len("Read("):].startswith(("~/", "//", "./")), rule
+
+
 def test_bridge_times_for_timed_and_all_day_events():
     from ajou_assistant.google_bridge import event_times
     start, end, all_day = event_times("2026-11-04", "17:00", 30)
