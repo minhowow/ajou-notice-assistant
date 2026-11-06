@@ -7,6 +7,8 @@
 결정·사실·할 일·일정을 records/에 정리한다. 자세한 흐름은 record.py 설명을 본다.
 
 실행 방식:
+- 턴이 도는 동안 스레드에 상태 메시지 하나를 띄워 읽는 파일, 검색어, 캘린더 작업을 실시간으로 고친다(progress.py).
+  메시지의 멈추기 버튼은 그 턴의 Claude Code를 끝낸다. 턴이 끝나면 상태 메시지는 한 줄 요약으로 줄어든다.
 - VM에 claude.ai 로그인(`claude auth login`)이 있으면 스레드는 구독으로 돌고, claude.ai 커넥터(학교 캘린더,
   노션)를 쓴다. 커넥터 호출은 guard.py가 먼저 검사한다. 구독 한도나 로그인 문제로 실패하면 같은 턴을
   API 키로 다시 돌린다(커넥터 없이). 로그인이 없으면 처음부터 API 키로 돈다.
@@ -40,7 +42,7 @@ from pathlib import Path
 import anthropic
 import discord
 
-from . import english, followup, guard, record, repost, store
+from . import english, followup, guard, progress, record, repost, store
 from .config import (
     ACTIONS_FILE, HOME_DIR, MODEL, PROMPT_FILE, SESSIONS_FILE, STATE_DIR, THREAD_DIR, load_discord, load_secrets, setting,
     user_name,
@@ -143,7 +145,7 @@ def claude_command(workdir: str, session: str | None, plan: bool = False, mode: 
         allowed += guard.tool_names()
     command = [
         shutil.which("claude") or str(Path.home() / ".local/bin/claude"), "-p",
-        "--output-format", "json", "--model", MODEL, "--permission-mode", "dontAsk",
+        "--output-format", "stream-json", "--verbose", "--model", MODEL, "--permission-mode", "dontAsk",
         "--allowedTools", " ".join(allowed),
         "--disallowedTools", " ".join(["Bash", "WebFetch", "Agent", *KEEP_OUT]),
         "--append-system-prompt", f"{system_prompt(plan, mode)}\n작업 폴더: {workdir}",
@@ -179,27 +181,103 @@ def plan_failed(result: dict) -> bool:
     return any(word in text for word in PLAN_FAILURE_WORDS)
 
 
-async def run_claude(prompt: str, command: list[str], environment: dict[str, str]) -> dict:
+class Stopped(Exception):
+    """사용자가 멈추기 버튼으로 턴을 끝냈다."""
+
+
+class Turn:
+    """실행 중인 턴 하나. on_event는 stream-json 사건마다 불린다. stop()은 Claude Code 프로세스를 끝낸다."""
+
+    def __init__(self, on_event=None) -> None:
+        self.on_event = on_event
+        self.process: asyncio.subprocess.Process | None = None
+        self.stopped = False
+
+    def event(self, event: dict) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(event)
+        except Exception:  # 상태 표시가 실패해도 턴은 계속한다.
+            print(traceback.format_exc(), flush=True)
+
+    def stop(self) -> bool:
+        """돌고 있으면 끝내고 True. 이미 끝났으면 결과를 버리지 않도록 아무것도 하지 않는다."""
+        if self.process is not None and self.process.returncode is None:
+            self.stopped = True
+            self.process.terminate()
+            return True
+        return False
+
+
+async def run_claude(prompt: str, command: list[str], environment: dict[str, str], turn: Turn | None = None) -> dict:
+    """stream-json 출력을 한 줄씩 읽어 사건을 turn에 넘기고, 마지막 result 사건을 돌려준다.
+
+    도구 결과 줄은 파일 하나를 통째로 담아 수 MB가 될 수 있어 readline(기본 64KB 한도) 대신 직접 자른다.
+    """
+    turn = turn or Turn()
+    if turn.stopped:
+        raise Stopped()
     process = await asyncio.create_subprocess_exec(
         *command, cwd=HOME_DIR, env=environment,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
+    turn.process = process
+    result: dict | None = None
+    last = b""
+
+    def handle(line: bytes) -> None:
+        nonlocal result, last
+        if not line.strip():
+            return
+        last = line
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if isinstance(event, dict) and event.get("type") == "result":
+            result = event
+        elif isinstance(event, dict):
+            turn.event(event)
+
+    async def read() -> None:
+        try:
+            process.stdin.write(prompt.encode())
+            await process.stdin.drain()
+            process.stdin.close()
+        except (BrokenPipeError, ConnectionResetError):  # 바로 끝난 경우. 남은 출력(오류 결과)은 그대로 읽는다.
+            pass
+        pieces: list[bytes] = []
+        while chunk := await process.stdout.read(1 << 16):
+            while b"\n" in chunk:
+                head, chunk = chunk.split(b"\n", 1)
+                handle(b"".join([*pieces, head]))
+                pieces = []
+            pieces.append(chunk)
+        handle(b"".join(pieces))
+        await process.wait()
+
+    errors = asyncio.create_task(process.stderr.read())
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(prompt.encode()), TURN_TIMEOUT)
+        await asyncio.wait_for(read(), TURN_TIMEOUT)
     except asyncio.TimeoutError:
         process.terminate()
+        errors.cancel()
         raise RuntimeError("시간 초과") from None
-    try:
-        return json.loads(stdout.decode(errors="replace"))
-    except json.JSONDecodeError:
-        raise RuntimeError((stderr or stdout).decode(errors="replace")[:400]) from None
+    stderr = await errors
+    if turn.stopped:
+        raise Stopped()
+    if result is None:
+        raise RuntimeError((stderr or last).decode(errors="replace")[:400])
+    return result
 
 
-async def run_turn(prompt: str, workdir: str, session: str | None, mode: str = "chat") -> dict:
+async def run_turn(prompt: str, workdir: str, session: str | None, mode: str = "chat", turn: Turn | None = None) -> dict:
     """Claude Code를 한 턴 실행한다. 결과의 `auth`에 plan 또는 api를 적는다."""
+    turn = turn or Turn()
     if plan_login():
         try:
-            result = await run_claude(prompt, claude_command(workdir, session, True, mode), turn_environment(True))
+            result = await run_claude(prompt, claude_command(workdir, session, True, mode), turn_environment(True), turn)
         except RuntimeError as error:
             result = {"is_error": True, "result": str(error)}
             if not plan_failed(result):
@@ -207,8 +285,17 @@ async def run_turn(prompt: str, workdir: str, session: str | None, mode: str = "
         if not plan_failed(result):
             return {**result, "auth": "plan"}
         print(f"구독 실행 실패, API 키로 다시 실행: {str(result.get('result'))[:200]}", flush=True)
-    result = await run_claude(prompt, claude_command(workdir, session, False, mode), turn_environment(False))
+        turn.event({"type": "assistant", "message": {"content": [{"type": "text", "text": "구독으로 실패해 API 키로 다시 실행합니다."}]}})
+    result = await run_claude(prompt, claude_command(workdir, session, False, mode), turn_environment(False), turn)
     return {**result, "auth": "api"}
+
+
+def stop_view(thread_id: int) -> discord.ui.View:
+    """상태 메시지의 멈추기 버튼. 누르면 on_interaction이 `ajou:stop:<스레드>`로 받는다."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="멈추기", emoji="⏹", style=discord.ButtonStyle.secondary,
+                                    custom_id=f"ajou:stop:{thread_id}"))
+    return view
 
 
 def notice_row(article_id: str) -> dict | None:
@@ -342,6 +429,7 @@ class Assistant(discord.Client):
         self.sessions = load_sessions()
         self.locks: dict[int, asyncio.Lock] = {}
         self.pending: dict[int, list[discord.Message]] = {}
+        self.turns: dict[int, Turn] = {}  # 스레드 → 실행 중인 턴(멈추기 버튼용)
         self.recent_thread: dict[int, tuple[float, int]] = {}  # 채널 → (마지막 메시지 시각, 스레드)
         self.gate = asyncio.Semaphore(2)
         self.pin_lock = asyncio.Lock()
@@ -428,6 +516,11 @@ class Assistant(discord.Client):
             return
         if action == "cal":
             await self.add_calendar(interaction, article)
+            return
+        if action == "stop":
+            turn = self.turns.get(int(article)) if article.isdigit() else None
+            stopped = turn is not None and turn.stop()
+            await interaction.response.send_message("멈추는 중입니다." if stopped else "이미 끝난 턴입니다.", ephemeral=True)
             return
         key = int(article) if article.isdigit() else article
         if action == "pin":
@@ -565,14 +658,27 @@ class Assistant(discord.Client):
                     source = await asyncio.to_thread(save_notice, row, folder)
                     prompt = f"이 스레드는 공지 하나를 다룬다. 원문과 첨부는 {source}/notice.md, 이미지는 같은 폴더, 분석은 analysis.json에 있다.\n\n{prompt}"
             before = {path: path.stat().st_mtime for path in folder.rglob("*") if path.is_file()}
-            async with thread.typing():
-                try:
-                    result = await run_turn(prompt, workdir, state.get("session"), state.get("mode", "chat"))
-                except Exception as error:
-                    print(traceback.format_exc(), flush=True)
-                    record.log_turn(folder, "시스템", f"실행 실패: {str(error)[:300]}")
-                    await thread.send(f"실행 실패: {str(error)[:300]}", **quiet())
-                    return
+            status = progress.Progress(thread, str(HOME_DIR), stop_view(thread.id))
+            turn = Turn(status.note)
+            self.turns[thread.id] = turn
+            await status.start()
+            try:
+                async with thread.typing():
+                    result = await run_turn(prompt, workdir, state.get("session"), state.get("mode", "chat"), turn)
+            except Stopped:
+                await status.finish("⏹ 멈춤")
+                record.log_turn(folder, "시스템", "사용자가 턴을 멈췄습니다.")
+                await thread.send("멈췄습니다. 이번 메시지는 대화 맥락에 남지 않았을 수 있으니, 이어서 할 일을 다시 적어 주세요.", **quiet())
+                return
+            except Exception as error:
+                print(traceback.format_exc(), flush=True)
+                await status.finish("⚠️ 실패")
+                record.log_turn(folder, "시스템", f"실행 실패: {str(error)[:300]}")
+                await thread.send(f"실행 실패: {str(error)[:300]}", **quiet())
+                return
+            finally:
+                self.turns.pop(thread.id, None)
+            await status.finish("⚠️ 오류" if result.get("is_error") else "✅ 끝")
             total = float(result.get("total_cost_usd") or 0)
             turn = max(0.0, total - float(state.get("cost", 0)))
             state.update(session=result.get("session_id", state.get("session")), cost=total,
