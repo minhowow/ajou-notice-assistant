@@ -2,7 +2,7 @@
 
 스레드 하나가 Claude Code 세션 하나다. 세션 파일은 봇을 돌리는 컴퓨터의 ~/.claude에 남는다. 봇이 쓰는
 세션을 터미널에서 `claude --resume`으로 직접 열면 안 된다. 두 곳이 같은 세션 파일에 번갈아 쓰면 경고 없이
-대화가 두 갈래로 갈라진다(11/7 실험). 세션 파일이 없어졌으면(정리 기간이 지난 경우) 새 세션으로 시작하고
+대화가 두 갈래로 갈라진다(11/7 실험). 다른 컴퓨터에서 이어 하려면 `ajou open`으로 넘겨받는다(handoff.py). 세션 파일이 없어졌으면(정리 기간이 지난 경우) 새 세션으로 시작하고
 log.md를 읽게 한다.
 
 스레드 정리: '완료'라고 쓰거나, 답이 끝난 상태 줄의 [완료하고 닫기], 공지 알림의 완료·패스를 누르면 기록을
@@ -49,7 +49,7 @@ from pathlib import Path
 import anthropic
 import discord
 
-from . import english, followup, guard, progress, record, repost, store
+from . import english, followup, guard, handoff, progress, record, repost, store
 from .config import (
     ACTIONS_FILE, HOME_DIR, MODEL, PROMPT_FILE, SESSIONS_FILE, STATE_DIR, THREAD_DIR, load_discord, load_secrets, setting,
     user_name,
@@ -57,7 +57,7 @@ from .config import (
 from .notify import PIN_LABEL, UNPIN_LABEL, _clip, split_message
 from .scrape import Fetcher, ListItem
 from .style import apply_style
-from .sync import sync_push
+from .sync import sync_pull, sync_push
 
 PINS_FILE = STATE_DIR / "pins.json"
 FOLLOWUPS_FILE = STATE_DIR / "followups.json"
@@ -86,6 +86,8 @@ DONE_MARK = "✅"
 # Claude Code는 기본으로 30일 지난 세션 파일을 지운다. 한 달 넘게 쉰 스레드도 이어지게 늘린다.
 KEEP_SESSION_DAYS = 3650
 RECORD_CHECK_SECONDS = 300
+LEASE_CHECK_SECONDS = 5
+HOLD_MARK = "⏸"
 RECORD_MAX_FAILURES = 3
 
 SYSTEM = """너는 {user}의 개인 비서이고 지금 Discord 스레드에서 대화한다.
@@ -315,6 +317,14 @@ def stop_view(thread_id: int) -> discord.ui.View:
     return view
 
 
+def reclaim_view(thread_id: int) -> discord.ui.View:
+    """다른 컴퓨터가 스레드를 쥐고 있을 때의 버튼. 맥을 덮고 나왔을 때 Discord에서 되찾는다."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="Discord로 되찾기", emoji="🔓", style=discord.ButtonStyle.secondary,
+                                    custom_id=f"ajou:reclaim:{thread_id}"))
+    return view
+
+
 def close_view(thread_id: int) -> discord.ui.View:
     """답이 끝난 상태 줄의 버튼. 누르면 기록을 정리하고 스레드를 닫는다(`ajou:close:<스레드>`)."""
     view = discord.ui.View(timeout=None)
@@ -479,6 +489,7 @@ class Assistant(discord.Client):
         self.loop.create_task(self.record_loop())
         self.loop.create_task(self.english_loop())
         self.loop.create_task(self.followup_loop())
+        self.loop.create_task(self.lease_loop())
 
     async def on_ready(self) -> None:
         print(f"연결됨: {self.user} 서버 {len(self.guilds)}개, 스레드 실행: {'구독' if plan_login() else 'API 키'}", flush=True)
@@ -573,6 +584,11 @@ class Assistant(discord.Client):
         """
         key = str(thread.id)
         state = self.sessions.setdefault(key, {"title": thread.name})
+        lease = handoff.lease_of(key)
+        if lease is not None:  # 닫아도 다른 컴퓨터에서 돌아오는 순간 다시 열린다. 돌아온 뒤에 닫는다.
+            where = lease.get("holder") or "다른 컴퓨터"
+            await thread.send(f"💻 {where}에서 작업 중이라 닫지 않았어요. {where}에서 끝낸 뒤 다시 완료해 주세요.", **quiet(silent=True))
+            return
         was_archived = bool(getattr(thread, "archived", False))
         try:
             await self.flush_thread(key, thread)
@@ -640,6 +656,11 @@ class Assistant(discord.Client):
             turn = self.turns.get(int(article)) if article.isdigit() else None
             stopped = turn is not None and turn.stop()
             await interaction.response.send_message("멈추는 중입니다." if stopped else "이미 끝난 턴입니다.", ephemeral=True)
+            return
+        if action == "reclaim":
+            await interaction.response.send_message("되찾는 중입니다. 다른 컴퓨터에서 한 대화는 이 스레드에 반영되지 않습니다.", ephemeral=True)
+            if article.isdigit() and await asyncio.to_thread(handoff.reclaim, article):
+                await self.finish_lease(article)
             return
         if action == "close":
             await interaction.response.defer()  # 스레드에 안내 한 줄이 올라가므로 따로 답하지 않는다.
@@ -761,92 +782,217 @@ class Assistant(discord.Client):
         return "\n".join(lines) + "\n\n"
 
     async def converse(self, thread: discord.Thread, message: discord.Message) -> None:
-        """메시지를 줄 세우고, 차례가 오면 그동안 밀린 메시지를 한 턴으로 묶어 보낸다."""
+        """메시지를 줄 세우고, 차례가 오면 그동안 밀린 메시지를 한 턴으로 묶어 보낸다.
+
+        다른 컴퓨터가 이 스레드를 넘겨받아 쥐고 있으면(handoff) 턴을 돌리지 않고 ⏸를 붙여 기다린다.
+        """
         key = str(thread.id)
         self.pending.setdefault(thread.id, []).append(message)
         async with self.lock_for(thread.id), self.gate:
             messages = self.pending.pop(thread.id, [])
             if not messages:  # 앞 턴이 이 메시지까지 함께 보냈다.
                 return
-            state = self.sessions.setdefault(key, {"title": thread.name})
-            folder = THREAD_DIR / key
-            folder.mkdir(parents=True, exist_ok=True)
-            workdir = str(folder.relative_to(HOME_DIR))
-            parts = []
-            for item in messages:
-                said = message_text(item)
-                if item.attachments:
-                    inbox = folder / "uploads"
-                    inbox.mkdir(exist_ok=True)
-                    names = []
-                    for attachment in item.attachments[:5]:
-                        path = inbox / Path(attachment.filename).name
-                        await attachment.save(path)
-                        names.append(str(path.relative_to(HOME_DIR)))
-                    said += "\n\n사용자가 올린 파일: " + ", ".join(names)
-                parts.append(said)
-            said = "\n\n---\n\n".join(parts)
-            record.log_turn(folder, "나", said)
-            state.update(last=store.now().isoformat(timespec="seconds"), title=thread.name)
-            save_sessions(self.sessions)
-            spent = store.month_usage("thread")
-            if spent >= MONTHLY_LIMIT_USD and not plan_login():
-                await thread.send(f"이번 달 스레드 예산 ${MONTHLY_LIMIT_USD:.0f}을 다 썼습니다. 대화 원문은 기록에 남습니다.", **quiet())
-                return
-            prompt = await self.repost_context(state, folder) + said
-            if state.get("session") and not session_exists(state["session"]):
-                print(f"세션 파일 없음, 새 세션으로 시작 {key}: {state['session']}", flush=True)
-                state.update(session=None, cost=0)
-                prompt = (f"[이 스레드의 이전 Claude Code 세션 파일이 없어 새 세션으로 이어 간다. 지금까지의 대화 원문은 "
-                          f"{workdir}/{record.LOG_NAME}에 있으니 먼저 읽는다.]\n\n{prompt}")
-            if state.get("notice") and not state.get("session"):
-                row = notice_row(str(state["notice"]))
-                if row is not None:
-                    source = await asyncio.to_thread(save_notice, row, folder)
-                    prompt = f"이 스레드는 공지 하나를 다룬다. 원문과 첨부는 {source}/notice.md, 이미지는 같은 폴더, 분석은 analysis.json에 있다.\n\n{prompt}"
-            before = {path: path.stat().st_mtime for path in folder.rglob("*") if path.is_file()}
-            await self.drop_close_button(thread.id)
-            status = progress.Progress(thread, str(HOME_DIR), stop_view(thread.id))
-            turn = Turn(status.note)
-            self.turns[thread.id] = turn
-            await status.start()
+            async with handoff.turn_lock(key):  # 턴 도중에 세션 파일을 가져가지 못하게.
+                if handoff.lease_of(key) is not None:
+                    await self.hold(thread, messages)
+                    return
+                await self.run_messages(thread, messages)
+
+    async def run_messages(self, thread: discord.Thread, messages: list[discord.Message]) -> None:
+        """밀린 메시지를 한 턴으로 보내고 답을 올린다. converse가 잠금을 잡고 부른다."""
+        key = str(thread.id)
+        state = self.sessions.setdefault(key, {"title": thread.name})
+        folder = THREAD_DIR / key
+        folder.mkdir(parents=True, exist_ok=True)
+        workdir = str(folder.relative_to(HOME_DIR))
+        parts = []
+        for item in messages:
+            said = message_text(item)
+            if item.attachments:
+                inbox = folder / "uploads"
+                inbox.mkdir(exist_ok=True)
+                names = []
+                for attachment in item.attachments[:5]:
+                    path = inbox / Path(attachment.filename).name
+                    await attachment.save(path)
+                    names.append(str(path.relative_to(HOME_DIR)))
+                said += "\n\n사용자가 올린 파일: " + ", ".join(names)
+            parts.append(said)
+        said = "\n\n---\n\n".join(parts)
+        record.log_turn(folder, "나", said)
+        state.update(last=store.now().isoformat(timespec="seconds"), title=thread.name)
+        save_sessions(self.sessions)
+        spent = store.month_usage("thread")
+        if spent >= MONTHLY_LIMIT_USD and not plan_login():
+            await thread.send(f"이번 달 스레드 예산 ${MONTHLY_LIMIT_USD:.0f}을 다 썼습니다. 대화 원문은 기록에 남습니다.", **quiet())
+            return
+        prompt = await self.repost_context(state, folder) + said
+        elsewhere = state.pop("returned_from", None)
+        if elsewhere:
+            prompt = (f"[직전 대화 일부는 사용자가 다른 컴퓨터({elsewhere})에서 직접 이어 했다. 거기 나온 경로는 앞쪽을 "
+                      f"{HOME_DIR}로 바꿔 읽는다. 그곳에서 바꾼 파일은 git으로 받아 두었다.]\n\n{prompt}")
+        if state.get("session") and not session_exists(state["session"]):
+            print(f"세션 파일 없음, 새 세션으로 시작 {key}: {state['session']}", flush=True)
+            state.update(session=None, cost=0)
+            prompt = (f"[이 스레드의 이전 Claude Code 세션 파일이 없어 새 세션으로 이어 간다. 지금까지의 대화 원문은 "
+                      f"{workdir}/{record.LOG_NAME}에 있으니 먼저 읽는다.]\n\n{prompt}")
+        if state.get("notice") and not state.get("session"):
+            row = notice_row(str(state["notice"]))
+            if row is not None:
+                source = await asyncio.to_thread(save_notice, row, folder)
+                prompt = f"이 스레드는 공지 하나를 다룬다. 원문과 첨부는 {source}/notice.md, 이미지는 같은 폴더, 분석은 analysis.json에 있다.\n\n{prompt}"
+        before = {path: path.stat().st_mtime for path in folder.rglob("*") if path.is_file()}
+        await self.drop_close_button(thread.id)
+        status = progress.Progress(thread, str(HOME_DIR), stop_view(thread.id))
+        turn = Turn(status.note)
+        self.turns[thread.id] = turn
+        await status.start()
+        try:
+            async with thread.typing():
+                result = await run_turn(prompt, workdir, state.get("session"), state.get("mode", "chat"), turn)
+        except Stopped:
+            await status.finish("⏹ 멈춤")
+            record.log_turn(folder, "시스템", "사용자가 턴을 멈췄습니다.")
+            await thread.send("멈췄습니다. 이번 메시지는 대화 맥락에 남지 않았을 수 있으니, 이어서 할 일을 다시 적어 주세요.", **quiet())
+            return
+        except Exception as error:
+            print(traceback.format_exc(), flush=True)
+            await status.finish("⚠️ 실패")
+            record.log_turn(folder, "시스템", f"실행 실패: {str(error)[:300]}")
+            await thread.send(f"실행 실패: {str(error)[:300]}", **quiet())
+            return
+        finally:
+            self.turns.pop(thread.id, None)
+        closing = close_view(thread.id)
+        await status.finish("⚠️ 오류" if result.get("is_error") else "✅ 끝", closing)
+        if status.message is not None:
+            self.last_status[thread.id] = (status.message, closing)
+        total = float(result.get("total_cost_usd") or 0)
+        turn = max(0.0, total - float(state.get("cost", 0)))
+        state.update(session=result.get("session_id", state.get("session")), cost=total,
+                     last=store.now().isoformat(timespec="seconds"))
+        save_sessions(self.sessions)
+        # 구독으로 돈 턴은 API 비용이 아니다. 추정치만 thread-plan으로 남겨 월 비용 합계에서 뺀다.
+        store.add_usage("thread" if result.get("auth") == "api" else "thread-plan", turn, key)
+        answer = str(result.get("result") or "(답변이 비어 있습니다)")
+        record.log_turn(folder, "비서", answer)
+        try:
+            for chunk in split_message(answer):
+                await thread.send(chunk, **quiet())
+            await self.send_files(thread, folder, before)
+        except discord.HTTPException:
+            print(traceback.format_exc(), flush=True)
+            await thread.send("답장 전송에 실패했습니다. 답은 스레드 기록(log.md)에 남아 있습니다.", **quiet())
+        await asyncio.to_thread(sync_push, f"auto: 스레드 {key}", workdir, str(store.USAGE_DIR))
+
+    # ── 다른 컴퓨터로 넘겨받기 (handoff.py, `ajou open`) ─────────────
+
+    async def hold(self, thread: discord.Thread, messages: list[discord.Message]) -> None:
+        """넘겨준 동안 온 메시지는 번호만 남기고 ⏸를 붙인다. 돌아오면 resume_held가 한 턴으로 답한다."""
+        state = self.sessions.setdefault(str(thread.id), {"title": thread.name})
+        held = state.setdefault("held", [])
+        held += [item.id for item in messages if item.id not in held]
+        save_sessions(self.sessions)
+        for item in messages:
             try:
-                async with thread.typing():
-                    result = await run_turn(prompt, workdir, state.get("session"), state.get("mode", "chat"), turn)
-            except Stopped:
-                await status.finish("⏹ 멈춤")
-                record.log_turn(folder, "시스템", "사용자가 턴을 멈췄습니다.")
-                await thread.send("멈췄습니다. 이번 메시지는 대화 맥락에 남지 않았을 수 있으니, 이어서 할 일을 다시 적어 주세요.", **quiet())
-                return
-            except Exception as error:
-                print(traceback.format_exc(), flush=True)
-                await status.finish("⚠️ 실패")
-                record.log_turn(folder, "시스템", f"실행 실패: {str(error)[:300]}")
-                await thread.send(f"실행 실패: {str(error)[:300]}", **quiet())
-                return
-            finally:
-                self.turns.pop(thread.id, None)
-            closing = close_view(thread.id)
-            await status.finish("⚠️ 오류" if result.get("is_error") else "✅ 끝", closing)
-            if status.message is not None:
-                self.last_status[thread.id] = (status.message, closing)
-            total = float(result.get("total_cost_usd") or 0)
-            turn = max(0.0, total - float(state.get("cost", 0)))
-            state.update(session=result.get("session_id", state.get("session")), cost=total,
-                         last=store.now().isoformat(timespec="seconds"))
-            save_sessions(self.sessions)
-            # 구독으로 돈 턴은 API 비용이 아니다. 추정치만 thread-plan으로 남겨 월 비용 합계에서 뺀다.
-            store.add_usage("thread" if result.get("auth") == "api" else "thread-plan", turn, key)
-            answer = str(result.get("result") or "(답변이 비어 있습니다)")
-            record.log_turn(folder, "비서", answer)
-            try:
-                for chunk in split_message(answer):
-                    await thread.send(chunk, **quiet())
-                await self.send_files(thread, folder, before)
+                await item.add_reaction(HOLD_MARK)
             except discord.HTTPException:
+                pass
+
+    async def resume_held(self, thread: discord.Thread) -> None:
+        state = self.sessions.get(str(thread.id)) or {}
+        ids = state.pop("held", [])
+        save_sessions(self.sessions)
+        messages = []
+        for message_id in ids:
+            try:
+                message = await thread.fetch_message(message_id)
+            except discord.HTTPException:
+                continue
+            try:
+                await message.remove_reaction(HOLD_MARK, self.user)
+            except discord.HTTPException:
+                pass
+            messages.append(message)
+        if messages:
+            self.pending.setdefault(thread.id, []).extend(messages[:-1])
+            await self.converse(thread, messages[-1])
+
+    async def lease_loop(self) -> None:
+        """넘겨받기 잠금을 몇 초마다 본다. 새로 잡히면 알리고, 맥의 한 줄 요약을 올리고, 풀리면 이어 답한다.
+
+        재시작해도 같은 알림을 두 번 올리지 않도록 알린 잠금의 token을 threads.json에 둔다.
+        """
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await self.check_leases()
+            except Exception:
                 print(traceback.format_exc(), flush=True)
-                await thread.send("답장 전송에 실패했습니다. 답은 스레드 기록(log.md)에 남아 있습니다.", **quiet())
-            await asyncio.to_thread(sync_push, f"auto: 스레드 {key}", workdir, str(store.USAGE_DIR))
+            await asyncio.sleep(LEASE_CHECK_SECONDS)
+
+    async def check_leases(self) -> None:
+        leases = handoff.current_leases()
+        for key, lease in leases.items():
+            state = self.sessions.get(key)
+            if state is None:
+                continue
+            seen = state.get("lease") or {}
+            thread = None
+            if seen.get("token") != lease.get("token"):
+                thread = await self.thread_by_id(int(key))
+                if thread is None:
+                    continue
+                await self.reopen(thread)
+                where = lease.get("holder") or "다른 컴퓨터"
+                notice = await thread.send(f"💻 {where}에서 작업 중 · 여기에 쓴 글은 {where}에서 닫으면 이어서 답합니다.",
+                                           view=reclaim_view(thread.id), **quiet(silent=True))
+                state["lease"] = seen = {"token": lease.get("token"), "message": notice.id, "notes": 0, "holder": where}
+                save_sessions(self.sessions)
+            rows, offset = handoff.read_notes(key, int(seen.get("notes", 0)))
+            if not rows:
+                continue
+            thread = thread or await self.thread_by_id(int(key))
+            if thread is None:
+                continue
+            for row in rows:
+                line = "🖥 " + (row.get("text") or "답함")
+                if row.get("files"):
+                    line += "\n바뀐 파일: " + ", ".join(Path(name).name for name in row["files"][:5])
+                await thread.send(line[:1900], **quiet(silent=True))
+            seen["notes"] = offset
+            save_sessions(self.sessions)
+        for key, state in list(self.sessions.items()):
+            if state.get("lease") and key not in leases:
+                await self.finish_lease(key)
+
+    async def finish_lease(self, key: str) -> None:
+        """잠금이 풀렸다(돌아왔거나 되찾았다). 알림 버튼을 떼고, 맥 커밋을 받고, 기다린 메시지에 답한다."""
+        async with self.lock_for(int(key)):
+            state = self.sessions.get(key) or {}
+            seen = state.pop("lease", None)
+            if seen is None:
+                return
+            result = handoff.pop_result(key)
+            if result.get("home"):
+                state["returned_from"] = result["home"]
+            save_sessions(self.sessions)
+            thread = await self.thread_by_id(int(key))
+            if thread is None:
+                return
+            where = seen.get("holder", "다른 컴퓨터")
+            try:
+                await thread.get_partial_message(seen["message"]).edit(content=f"💻 {where}에서 작업함", view=None)
+            except (discord.HTTPException, KeyError):
+                pass
+            if result.get("reclaimed"):
+                text = f"🔓 Discord로 되찾았습니다. {where}에서 한 대화는 반영되지 않았습니다."
+            else:
+                files = result.get("files", [])
+                text = f"🔙 {where}에서 돌아왔습니다" + (f" · 바뀐 파일 {len(files)}개" if files else "")
+                await asyncio.to_thread(sync_pull)  # 맥에서 커밋한 파일을 받는다.
+            await thread.send(text, **quiet(silent=True))
+        await self.resume_held(thread)
 
     async def send_files(self, thread: discord.Thread, folder: Path, before: dict[Path, float]) -> None:
         for path in sorted(folder.rglob("*")):

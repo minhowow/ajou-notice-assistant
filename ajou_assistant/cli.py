@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta
 import anthropic
 import httpx
 
-from . import english, repost, store
+from . import english, handoff, repost, store
 from .config import (
     BOARDS, HEARTBEAT_DIR, LIST_PAGE_SIZE, SESSIONS_FILE, STATE_DIR, Board, SetupError, load_discord, load_secrets, setting,
 )
@@ -1213,10 +1213,20 @@ def main() -> int:
     check.add_argument("--title", default="")
     check.add_argument("--effort", default="low")
     check.set_defaults(func=cmd_check)
+    lease = commands.add_parser("lease", help="스레드 넘겨받기 잠금 (봇이 도는 곳에서 ajou open이 부른다)")
+    lease.add_argument("action", choices=["list", "take", "give", "note"])
+    lease.add_argument("key", nargs="?", default="")
+    lease.add_argument("token", nargs="?", default="")
+    lease.set_defaults(func=handoff.lease_main)
+    opener = commands.add_parser("open", help="Discord 스레드를 이 컴퓨터의 Claude Code로 가져와 이어 한다")
+    opener.add_argument("thread", nargs="?", default="", help="목록 번호나 스레드 번호. 없으면 목록에서 고른다")
+    opener.set_defaults(func=handoff.open_main)
     args = parser.parse_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    if args.func is cmd_schedule:  # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다.
-        return cmd_schedule(args)
+    # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 넘겨받기는 공지 실행과 상관없이
+    # 언제든 돼야 하고 스레드마다 따로 잠근다(handoff.held).
+    if args.func in (cmd_schedule, handoff.lease_main, handoff.open_main):
+        return args.func(args)
     with (STATE_DIR / "run.lock").open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

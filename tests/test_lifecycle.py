@@ -7,14 +7,14 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from ajou_assistant import bot, cli, guard, progress, store
+from ajou_assistant import bot, cli, guard, handoff, progress, store
 
 OWNER, GUILD, CHANNEL = 1, 2, 10
 
 
 class FakeMessage:
-    def __init__(self, text=None, view=None):
-        self.content, self.view, self.edits = text, view, []
+    def __init__(self, text=None, view=None, message_id=0):
+        self.content, self.view, self.edits, self.id = text, view, [], message_id
 
     async def edit(self, **kwargs):
         self.edits.append(kwargs)
@@ -39,7 +39,7 @@ class FakeThread(discord.Thread):
 
     async def send(self, content=None, **kwargs):
         self.events.append(("send", content))
-        message = FakeMessage(content, kwargs.get("view"))
+        message = FakeMessage(content, kwargs.get("view"), 1000 + len(self.sent))
         self.sent.append(message)
         return message
 
@@ -49,6 +49,25 @@ class FakeThread(discord.Thread):
 
     def typing(self):
         return Typing()
+
+    async def fetch_message(self, message_id):
+        events = self.events
+
+        class Held:
+            id = message_id
+            content, attachments, message_snapshots = f"기다린 글 {message_id}", [], []
+
+            async def remove_reaction(self, emoji, member):
+                events.append(("unreact", message_id, emoji))
+        return Held()
+
+    def get_partial_message(self, message_id):
+        events = self.events
+
+        class Partial:
+            async def edit(self, **kwargs):
+                events.append(("edit-message", message_id, kwargs.get("content")))
+        return Partial()
 
 
 class Parent:
@@ -76,6 +95,8 @@ def helper(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "sync_push", lambda *args: None)
     monkeypatch.setattr(store, "ACTIONS_FILE", tmp_path / "actions.jsonl")
     monkeypatch.setattr(store, "REPOSTS_FILE", tmp_path / "reposts.jsonl")
+    monkeypatch.setattr(handoff, "LEASE_DIR", tmp_path / "state" / "leases")
+    monkeypatch.setattr(handoff, "LOCK_DIR", tmp_path / "state" / "locks")
     assistant = bot.Assistant.__new__(bot.Assistant)
     assistant._connection = SimpleNamespace(user=SimpleNamespace(id=999))
     assistant.owner_id, assistant.guild_id, assistant.managed = OWNER, GUILD, {CHANNEL}
@@ -289,3 +310,70 @@ def test_guard_blocks_files_that_act_as_rules():
 def test_tool_search_has_a_plain_label():
     event = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "ToolSearch", "input": {}}]}}
     assert progress.steps(event, "/h") == ["🧰 도구 불러오기"]
+
+
+# ── 맥으로 넘겨받기 (v0.4.6) ─────────────────────────────────────
+
+def test_messages_wait_while_another_computer_holds_the_thread(helper, monkeypatch):
+    thread = add_thread(helper, 900, session="s1")
+    handoff._write_json(handoff.lease_path("900"), {"token": "t1", "holder": "맥"})
+    reacted = []
+
+    async def run_turn(*args, **kwargs):
+        pytest.fail("넘겨준 동안 턴을 돌림")
+    monkeypatch.setattr(bot, "run_turn", run_turn)
+    item = message(thread, "지금 뭐 해?")
+    item.add_reaction = lambda emoji: asyncio.sleep(0, reacted.append(emoji))
+    asyncio.run(helper.converse(thread, item))
+    assert helper.sessions["900"]["held"] == [7777] and reacted == ["⏸"]
+
+
+def test_lease_is_announced_once_notes_are_mirrored_and_return_resumes(helper, tmp_path, monkeypatch):
+    thread = add_thread(helper, 901, session="s1", held=[41, 42])
+    session = tmp_path / "s1.jsonl"
+    session.write_text("{}\n")
+    handoff._write_json(handoff.lease_path("901"), {"token": "t1", "holder": "맥", "path": str(session)})
+    handoff.note("901", "t1", {"text": "05_deadlines.md를 고쳤습니다", "files": ["05_deadlines.md"]})
+    asyncio.run(helper.check_leases())
+    asyncio.run(helper.check_leases())  # 두 번 돌아도 알림은 한 번
+    posts = [event[1] for event in helper.events if event[0] == "send"]
+    assert posts[0].startswith("💻 맥에서 작업 중") and len(posts) == 2
+    assert posts[1] == "🖥 05_deadlines.md를 고쳤습니다\n바뀐 파일: 05_deadlines.md"
+    assert thread.sent[0].view.children[0].custom_id == "ajou:reclaim:901"
+    # 맥이 돌려주면 세션 파일이 바뀌고, 봇은 알림 버튼을 떼고 맥 커밋을 받은 뒤 기다린 글에 한 턴으로 답한다.
+    resumed, pulled = [], []
+
+    async def converse(thread, item):
+        resumed.append([m.id for m in helper.pending.pop(thread.id, [])] + [item.id])
+    helper.converse = converse
+    monkeypatch.setattr(bot, "sync_pull", lambda: pulled.append(True))
+    meta = b'{"files": ["outputs/a.md"], "home": "/Users/me/Ajou"}'
+    assert handoff.give("901", "t1", handoff.pack({"session.jsonl": b"new\n", "meta.json": meta})) == 0
+    assert session.read_bytes() == b"new\n" and handoff.lease_of("901") is None
+    asyncio.run(helper.check_leases())
+    assert ("edit-message", thread.sent[0].id, "💻 맥에서 작업함") in helper.events
+    assert "🔙 맥에서 돌아왔습니다 · 바뀐 파일 1개" in [event[1] for event in helper.events if event[0] == "send"]
+    assert pulled == [True] and resumed == [[41, 42]] and ("unreact", 41, "⏸") in helper.events
+    state = helper.sessions["901"]
+    assert "lease" not in state and "held" not in state and state["returned_from"] == "/Users/me/Ajou"
+
+
+def test_reclaim_refuses_the_late_copy(helper, tmp_path):
+    session = tmp_path / "s2.jsonl"
+    session.write_text("old\n")
+    add_thread(helper, 902, session="s2")
+    handoff._write_json(handoff.lease_path("902"), {"token": "t2", "holder": "맥", "path": str(session)})
+    asyncio.run(helper.check_leases())
+    press = interaction("ajou:reclaim:902")
+    asyncio.run(helper.on_interaction(press))
+    assert "되찾는 중" in press.response.sent[0] and "lease" not in helper.sessions["902"]
+    assert "🔓 Discord로 되찾았습니다" in helper.events[-1][1]
+    assert handoff.give("902", "t2", handoff.pack({"session.jsonl": b"late\n"})) == handoff.EXIT_RECLAIMED
+    assert session.read_text() == "old\n"
+
+
+def test_done_word_waits_while_the_thread_is_away(helper):
+    thread = add_thread(helper, 903)
+    handoff._write_json(handoff.lease_path("903"), {"token": "t3"})
+    asyncio.run(helper.complete_thread(thread))
+    assert not thread.archived and "닫지 않았어요" in helper.events[-1][1]
