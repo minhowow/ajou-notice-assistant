@@ -60,6 +60,8 @@ def tool_line(name: str, arguments: dict, home: str) -> str:
         return f"🌐 웹 검색 '{_clip(arguments.get('query', ''), 50)}'"
     if name == "TodoWrite":
         return "📝 할 일 나누기"
+    if name == "ToolSearch":  # 캘린더·노션 같은 커넥터 도구를 쓰기 전에 불러온다.
+        return "🧰 도구 불러오기"
     if name.startswith(CALENDAR):
         action = name[len(CALENDAR):]
         title = arguments.get("summary") or arguments.get("query") or ""
@@ -167,8 +169,8 @@ class Progress:
         except discord.HTTPException:
             pass
 
-    async def finish(self, mark: str = "✅ 끝") -> None:
-        """한 줄 요약으로 줄이고 버튼을 뗀다."""
+    async def finish(self, mark: str = "✅ 끝", view: discord.ui.View | None = None) -> None:
+        """한 줄 요약으로 줄이고 멈추기 버튼을 뗀다. view를 주면 그 버튼(예: 완료하고 닫기)으로 바꾼다."""
         if self.task is not None:
             self.task.cancel()
             try:
@@ -178,4 +180,4 @@ class Progress:
         if self.view is not None:
             self.view.stop()  # discord.py가 들고 있는 버튼 처리기를 놓는다.
         done = f"{mark} · {elapsed(time.monotonic() - self.started)}" + (f" · 단계 {self.count}개" if self.count else "")
-        await self.show(done, view=None)
+        await self.show(done, view=view)

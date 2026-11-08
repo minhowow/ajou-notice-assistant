@@ -217,13 +217,14 @@ def deliver(discord: Discord, channel: str, tier: Tier, item: ListItem, detail: 
 
 
 def notice_threads(members: set) -> list[str]:
-    """이 공지 묶음으로 열린 Discord 스레드. 봇의 상태 파일을 읽기만 한다. 맥 예비 실행에는 파일이 없다."""
+    """이 공지 묶음으로 열린, 닫지 않은 Discord 스레드. 봇의 상태 파일을 읽기만 한다."""
     try:
         sessions = json.loads(SESSIONS_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return []
     wanted = {str(member) for member in members}
-    return [key for key, state in sessions.items() if str(state.get("notice", "")) in wanted]
+    # 닫은(완료한) 스레드에 쓰면 다시 열려 사이드바로 돌아온다. 재공지는 그 스레드 대신 처음 알림의 답장으로 간다.
+    return [key for key, state in sessions.items() if str(state.get("notice", "")) in wanted and not state.get("done")]
 
 
 def tell_threads(discord: Discord, root, text: str, tier: Tier) -> bool:

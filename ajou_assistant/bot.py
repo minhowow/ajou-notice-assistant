@@ -1,7 +1,14 @@
 """Discord 스레드와 Claude Code 세션을 잇는다.
 
-스레드 하나가 Claude Code 세션 하나다. 세션 파일은 봇을 돌리는 컴퓨터의 ~/.claude에 남으므로 같은
-대화를 터미널에서 `claude --resume <세션>`으로 이어 갈 수 있다.
+스레드 하나가 Claude Code 세션 하나다. 세션 파일은 봇을 돌리는 컴퓨터의 ~/.claude에 남는다. 봇이 쓰는
+세션을 터미널에서 `claude --resume`으로 직접 열면 안 된다. 두 곳이 같은 세션 파일에 번갈아 쓰면 경고 없이
+대화가 두 갈래로 갈라진다(11/7 실험). 세션 파일이 없어졌으면(정리 기간이 지난 경우) 새 세션으로 시작하고
+log.md를 읽게 한다.
+
+스레드 정리: '완료'라고 쓰거나, 답이 끝난 상태 줄의 [완료하고 닫기], 공지 알림의 완료·패스를 누르면 기록을
+정리하고 한 줄 안내 뒤 스레드를 보관(archive)해 사이드바에서 뺀다. 채널의 원래 메시지에는 ✅를 붙인다.
+닫은 스레드에는 봇이 쓰지 않는다(쓰면 다시 열린다). 사용자가 다시 쓰면 열리고 같은 세션이 이어진다.
+기록 요청 스레드는 답을 정리하면 닫히고, 답이 없으면 하루 뒤 Discord가 숨긴다.
 
 대화는 두 번 남는다. 턴마다 코드가 스레드 폴더의 log.md에 원문을 쓰고, 조용해지면 record.py가
 결정·사실·할 일·일정을 records/에 정리한다. 자세한 흐름은 record.py 설명을 본다.
@@ -74,6 +81,10 @@ GIT_KEEP_OUT = "Read(./.git/**)"
 SECRET_DIRS = ("~/.config", "~/.ssh", "~/.claude", "~/.cache")
 KEEP_OUT = [GIT_KEEP_OUT] + [f"Read({folder}/**)" for folder in SECRET_DIRS]
 RECORD_WORDS = {"정리", "기록", "!정리", "/정리"}
+DONE_WORDS = {"완료", "!완료", "/완료"}
+DONE_MARK = "✅"
+# Claude Code는 기본으로 30일 지난 세션 파일을 지운다. 한 달 넘게 쉰 스레드도 이어지게 늘린다.
+KEEP_SESSION_DAYS = 3650
 RECORD_CHECK_SECONDS = 300
 RECORD_MAX_FAILURES = 3
 
@@ -134,8 +145,15 @@ def plan_login() -> bool:
 
 
 def guard_settings() -> dict:
-    hook = f"{shlex.quote(sys.executable)} -I {shlex.quote(str(GUARD_FILE))}"
-    return {"hooks": {"PreToolUse": [{"matcher": "mcp__.*", "hooks": [{"type": "command", "command": hook}]}]}}
+    """턴마다 넘기는 설정: 커넥터와 파일 쓰기를 guard.py가 먼저 검사하고, 세션 파일을 오래 남긴다."""
+    hook = {"type": "command", "command": f"{shlex.quote(sys.executable)} -I {shlex.quote(str(GUARD_FILE))}"}
+    return {"cleanupPeriodDays": KEEP_SESSION_DAYS,
+            "hooks": {"PreToolUse": [{"matcher": f"mcp__.*|{guard.FILE_MATCHER}", "hooks": [hook]}]}}
+
+
+def session_exists(session: str) -> bool:
+    """세션 파일이 이 컴퓨터에 남아 있는지. 없으면 --resume이 결과 없이 실패한다."""
+    return any((Path.home() / ".claude" / "projects").glob(f"*/{session}.jsonl"))
 
 
 def claude_command(workdir: str, session: str | None, plan: bool = False, mode: str = "chat") -> list[str]:
@@ -150,9 +168,8 @@ def claude_command(workdir: str, session: str | None, plan: bool = False, mode: 
         "--disallowedTools", " ".join(["Bash", "WebFetch", "Agent", *KEEP_OUT]),
         "--append-system-prompt", f"{system_prompt(plan, mode)}\n작업 폴더: {workdir}",
         "--max-budget-usd", TURN_LIMIT_USD,
+        "--settings", json.dumps(guard_settings()),
     ]
-    if plan:
-        command += ["--settings", json.dumps(guard_settings())]
     return command + (["--resume", session] if session else [])
 
 
@@ -298,6 +315,14 @@ def stop_view(thread_id: int) -> discord.ui.View:
     return view
 
 
+def close_view(thread_id: int) -> discord.ui.View:
+    """답이 끝난 상태 줄의 버튼. 누르면 기록을 정리하고 스레드를 닫는다(`ajou:close:<스레드>`)."""
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(label="완료하고 닫기", style=discord.ButtonStyle.secondary,
+                                    custom_id=f"ajou:close:{thread_id}"))
+    return view
+
+
 def notice_row(article_id: str) -> dict | None:
     key = int(article_id) if article_id.isdigit() else article_id
     return next((row for row in store.recent_analysis() if row["id"] == key), None)
@@ -430,6 +455,7 @@ class Assistant(discord.Client):
         self.locks: dict[int, asyncio.Lock] = {}
         self.pending: dict[int, list[discord.Message]] = {}
         self.turns: dict[int, Turn] = {}  # 스레드 → 실행 중인 턴(멈추기 버튼용)
+        self.last_status: dict[int, tuple] = {}  # 스레드 → [완료하고 닫기]가 달린 마지막 상태 줄과 그 버튼
         self.recent_thread: dict[int, tuple[float, int]] = {}  # 채널 → (마지막 메시지 시각, 스레드)
         self.gate = asyncio.Semaphore(2)
         self.pin_lock = asyncio.Lock()
@@ -480,7 +506,8 @@ class Assistant(discord.Client):
             await asyncio.sleep(600)
 
     async def open_thread(self, message: discord.Message, name: str, notice: dict | None, mode: str = "chat") -> discord.Thread:
-        thread = await message.create_thread(name=name[:90], auto_archive_duration=10080)
+        # 기록 요청에 답이 없으면 하루 뒤 Discord가 사이드바에서 숨긴다. 다른 스레드는 7일.
+        thread = await message.create_thread(name=name[:90], auto_archive_duration=1440 if mode == "reflection" else 10080)
         await thread.add_user(discord.Object(self.owner_id))
         state = {"title": thread.name, "mode": mode}
         if notice is not None:
@@ -494,13 +521,105 @@ class Assistant(discord.Client):
         last = self.recent_thread.get(channel_id)
         if last is None or moment - last[0] > JOIN_SECONDS:
             return None
-        thread = self.get_channel(last[1])
+        if self.sessions.get(str(last[1]), {}).get("done"):  # 방금 닫은 스레드는 되살리지 않는다.
+            return None
+        return await self.thread_by_id(last[1])
+
+    # ── 스레드 닫기·다시 열기 ──────────────────────────────────────
+
+    async def thread_by_id(self, thread_id: int) -> discord.Thread | None:
+        """캐시에 없으면(보관된 스레드는 discord.py 캐시에서 빠진다) 직접 받아 온다."""
+        thread = self.get_channel(thread_id)
         if thread is None:
             try:
-                thread = await self.fetch_channel(last[1])
+                thread = await self.fetch_channel(thread_id)
             except discord.HTTPException:
                 return None
         return thread if isinstance(thread, discord.Thread) else None
+
+    async def existing_thread(self, message: discord.Message) -> discord.Thread | None:
+        """이 메시지에서 이미 열린 스레드. 보관된 스레드는 message.thread에 안 잡혀 다시 만들면 실패한다."""
+        if message.thread is not None:
+            return message.thread
+        return await self.thread_by_id(message.id)  # 메시지에서 연 스레드는 번호가 메시지 번호와 같다.
+
+    async def mark_starter(self, thread: discord.Thread, done: bool) -> None:
+        """채널에 남는 원래 메시지에 ✅를 붙이거나 뗀다. 실패해도 닫기·열기는 그대로 한다."""
+        channel = self.get_channel(thread.parent_id) if thread.parent_id else None
+        if channel is None or not hasattr(channel, "get_partial_message"):
+            return
+        starter = channel.get_partial_message(thread.id)
+        try:
+            if done:
+                await starter.add_reaction(DONE_MARK)
+            else:
+                await starter.remove_reaction(DONE_MARK, self.user)
+        except discord.HTTPException as error:
+            print(f"원래 메시지 표시 실패 {thread.id}: {error}", flush=True)
+
+    async def reopen(self, thread: discord.Thread) -> None:
+        """닫은 스레드에 사용자가 다시 쓰면 Discord가 연다. 봇은 표시만 되돌리고 같은 세션을 이어 간다."""
+        state = self.sessions.get(str(thread.id))
+        if not state or not state.get("done"):
+            return
+        state.pop("done", None)
+        save_sessions(self.sessions)
+        await self.mark_starter(thread, False)
+
+    async def complete_thread(self, thread: discord.Thread) -> None:
+        """기록 정리 → 한 줄 안내 → 닫음 표시 → ✅ → 보관. 보관 뒤에 봇이 쓰면 다시 열리므로 순서를 지킨다.
+
+        부르는 쪽이 lock_for(thread.id)를 잡고 부른다.
+        """
+        key = str(thread.id)
+        state = self.sessions.setdefault(key, {"title": thread.name})
+        was_archived = bool(getattr(thread, "archived", False))
+        try:
+            await self.flush_thread(key, thread)
+        except Exception:  # 기록이 실패해도 닫는다. log.md 원문은 남아 있고, 다시 열면 그때 정리한다.
+            print(traceback.format_exc(), flush=True)
+        await self.drop_close_button(thread.id)
+        if not was_archived:
+            await thread.send("✅ 완료로 닫습니다. 사이드바에서 빠지고, 채널의 원래 메시지·스레드 목록·검색에서 다시 볼 수 있어요. "
+                              "여기에 다시 쓰면 열리고 대화가 이어집니다.", **quiet(silent=True))
+        state["done"] = store.now().isoformat(timespec="seconds")
+        save_sessions(self.sessions)
+        for channel_id, (_, thread_id) in list(self.recent_thread.items()):
+            if thread_id == thread.id:
+                del self.recent_thread[channel_id]
+        await self.mark_starter(thread, True)
+        try:
+            await thread.edit(archived=True)
+        except discord.HTTPException as error:  # 사용자가 직접 만든 스레드는 봇이 닫을 권한이 없을 수 있다.
+            print(f"스레드 보관 실패 {key}: {error}", flush=True)
+            await thread.send("봇이 이 스레드를 닫지 못했습니다. 스레드 메뉴에서 직접 닫아 주세요.", **quiet(silent=True))
+
+    async def drop_close_button(self, thread_id: int) -> None:
+        """[완료하고 닫기]는 마지막 상태 줄에만 둔다. 새 턴이 시작되거나 스레드를 닫으면 뗀다."""
+        entry = self.last_status.pop(thread_id, None)
+        if entry is None:
+            return
+        message, view = entry
+        view.stop()  # discord.py가 들고 있는 버튼 처리기를 놓는다.
+        try:
+            await message.edit(view=None)
+        except discord.HTTPException:
+            pass
+
+    def notice_thread_keys(self, key) -> list[str]:
+        """이 공지 묶음(재공지 포함)으로 열린, 아직 닫지 않은 스레드."""
+        members = {str(member) for member in repost.group_ids(repost.root_of(key))}
+        return [thread for thread, state in self.sessions.items()
+                if str(state.get("notice", "")) in members and not state.get("done")]
+
+    async def close_threads(self, keys: list[str]) -> None:
+        for key in keys:
+            thread = await self.thread_by_id(int(key))
+            if thread is None:
+                continue
+            async with self.lock_for(thread.id):
+                if not self.sessions.get(key, {}).get("done"):
+                    await self.complete_thread(thread)
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         custom = (interaction.data or {}).get("custom_id", "")
@@ -522,24 +641,35 @@ class Assistant(discord.Client):
             stopped = turn is not None and turn.stop()
             await interaction.response.send_message("멈추는 중입니다." if stopped else "이미 끝난 턴입니다.", ephemeral=True)
             return
+        if action == "close":
+            await interaction.response.defer()  # 스레드에 안내 한 줄이 올라가므로 따로 답하지 않는다.
+            thread = await self.thread_by_id(int(article)) if article.isdigit() else None
+            if thread is not None:
+                async with self.lock_for(thread.id):
+                    await self.complete_thread(thread)
+            return
         key = int(article) if article.isdigit() else article
         if action == "pin":
             await self.toggle_pin(interaction, key)
             return
         if action in ("done", "skip"):
             store.mark_item(key, action)
+            threads = self.notice_thread_keys(key)
             # Discord는 3초 안에 응답해야 한다. git push는 그보다 오래 걸릴 수 있어 응답 뒤에 한다 (11/3 장애).
-            await interaction.response.send_message("마감 독촉을 껐습니다." if action == "skip" else "완료로 표시했습니다.", ephemeral=True)
+            text = "마감 독촉을 껐습니다." if action == "skip" else "완료로 표시했습니다."
+            await interaction.response.send_message(text + (" 이 공지의 스레드도 닫습니다." if threads else ""), ephemeral=True)
             if interaction.message is not None:  # 끝난 공지는 핀 모음에서 뺀다.
                 await self.set_pin(interaction.message, key, False, release=False)
             await asyncio.to_thread(sync_push, f"auto: {key} {action}", str(ACTIONS_FILE))
+            await self.close_threads(threads)
             return
         message = interaction.message
-        if message.thread is not None:
-            await interaction.response.send_message(f"이미 열린 스레드가 있습니다: {message.thread.mention}", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)  # 보관된 스레드를 찾는 데 시간이 걸릴 수 있어 먼저 응답한다.
+        existing = await self.existing_thread(message)
+        if existing is not None:
+            await interaction.followup.send(f"이미 열린 스레드가 있습니다: {existing.mention}", ephemeral=True)
             return
         row = notice_row(article)
-        await interaction.response.defer(ephemeral=True)
         title = row["title"] if row else "공지 대화"
         try:
             thread = await self.open_thread(message, title, row)
@@ -556,8 +686,19 @@ class Assistant(discord.Client):
         if message.author.bot or not self.allowed(message.author.id, message.guild.id if message.guild else None):
             return
         channel = message.channel
+        if isinstance(channel, discord.PartialMessageable):
+            # discord.py는 보관된 스레드를 캐시에서 뺀다. 닫힌 스레드에 다시 쓰면 메시지가 채널 정보 없이 올 수 있다.
+            # 예전에는 여기서 조용히 버려졌다(7일 자동 보관 뒤에도 같은 문제).
+            channel = await self.thread_by_id(channel.id)
+            if channel is None:
+                return
         if isinstance(channel, discord.Thread):
             if channel.parent_id in self.managed:
+                if message.content.strip() in DONE_WORDS:
+                    async with self.lock_for(channel.id):
+                        await self.complete_thread(channel)
+                    return
+                await self.reopen(channel)
                 if message.content.strip() in RECORD_WORDS:
                     async with self.lock_for(channel.id):
                         if not await self.flush_thread(str(channel.id), channel):
@@ -585,7 +726,8 @@ class Assistant(discord.Client):
                 if parent.author.id == self.user.id:
                     row = notice_for_message(parent.id)
                     title = row["title"] if row else thread_name(parent.content.replace("*", "")) if parent.content else "공지 대화"
-                    thread = parent.thread or await self.open_thread(parent, title, row)
+                    thread = await self.existing_thread(parent) or await self.open_thread(parent, title, row)
+                    await self.reopen(thread)
                     await self.converse(thread, message)
         except discord.Forbidden:
             await channel.send("봇에 스레드 권한이 없습니다. 권한 링크를 눌러 주세요.")
@@ -652,12 +794,18 @@ class Assistant(discord.Client):
                 await thread.send(f"이번 달 스레드 예산 ${MONTHLY_LIMIT_USD:.0f}을 다 썼습니다. 대화 원문은 기록에 남습니다.", **quiet())
                 return
             prompt = await self.repost_context(state, folder) + said
+            if state.get("session") and not session_exists(state["session"]):
+                print(f"세션 파일 없음, 새 세션으로 시작 {key}: {state['session']}", flush=True)
+                state.update(session=None, cost=0)
+                prompt = (f"[이 스레드의 이전 Claude Code 세션 파일이 없어 새 세션으로 이어 간다. 지금까지의 대화 원문은 "
+                          f"{workdir}/{record.LOG_NAME}에 있으니 먼저 읽는다.]\n\n{prompt}")
             if state.get("notice") and not state.get("session"):
                 row = notice_row(str(state["notice"]))
                 if row is not None:
                     source = await asyncio.to_thread(save_notice, row, folder)
                     prompt = f"이 스레드는 공지 하나를 다룬다. 원문과 첨부는 {source}/notice.md, 이미지는 같은 폴더, 분석은 analysis.json에 있다.\n\n{prompt}"
             before = {path: path.stat().st_mtime for path in folder.rglob("*") if path.is_file()}
+            await self.drop_close_button(thread.id)
             status = progress.Progress(thread, str(HOME_DIR), stop_view(thread.id))
             turn = Turn(status.note)
             self.turns[thread.id] = turn
@@ -678,7 +826,10 @@ class Assistant(discord.Client):
                 return
             finally:
                 self.turns.pop(thread.id, None)
-            await status.finish("⚠️ 오류" if result.get("is_error") else "✅ 끝")
+            closing = close_view(thread.id)
+            await status.finish("⚠️ 오류" if result.get("is_error") else "✅ 끝", closing)
+            if status.message is not None:
+                self.last_status[thread.id] = (status.message, closing)
             total = float(result.get("total_cost_usd") or 0)
             turn = max(0.0, total - float(state.get("cost", 0)))
             state.update(session=result.get("session_id", state.get("session")), cost=total,
@@ -859,7 +1010,7 @@ class Assistant(discord.Client):
         save_sessions(self.sessions)
         reply = f"기록했어요: `{path.relative_to(HOME_DIR)}`"
         if first:
-            reply += "\n더 떠오르면 이어서 써 주세요. 30분쯤 조용하면 할 일과 연락할 사람은 따로 정리해 둡니다."
+            reply += "\n더 떠오르면 이어서 써 주세요. 30분쯤 조용하면 할 일과 연락할 사람을 따로 정리하고 이 스레드를 닫습니다."
         await thread.send(reply, **quiet(silent=True))
         await asyncio.to_thread(sync_push, f"auto: 기록 {thread.name[:40]}", str(path), str(folder))
 
@@ -1001,7 +1152,7 @@ class Assistant(discord.Client):
 
     def needs_record(self, key: str, state: dict, now: datetime) -> bool:
         last = state.get("last")
-        if not last:
+        if not last or state.get("done"):  # 닫을 때 이미 정리했다. 다시 쓰면 열리면서 done이 풀린다.
             return False
         if (now - datetime.fromisoformat(last)).total_seconds() < record.IDLE_MINUTES * 60:
             return False
@@ -1023,7 +1174,12 @@ class Assistant(discord.Client):
                     continue
                 async with lock:
                     try:
-                        await self.flush_thread(key)
+                        # 기록 요청 스레드는 답을 정리하면 할 일이 끝난다. 정리와 함께 닫는다.
+                        thread = await self.thread_by_id(int(key)) if state.get("mode") == "reflection" and state.get("saved") else None
+                        if thread is not None:
+                            await self.complete_thread(thread)
+                        else:
+                            await self.flush_thread(key)
                     except Exception:
                         print(traceback.format_exc(), flush=True)
             await asyncio.sleep(RECORD_CHECK_SECONDS)
@@ -1061,7 +1217,7 @@ class Assistant(discord.Client):
         await asyncio.to_thread(sync_push, f"auto: 대화 기록 {title[:40]}", str(folder.relative_to(HOME_DIR)),
                                 str(record.RECORDS_DIR), str(ACTIONS_FILE), str(store.USAGE_DIR))
         summary = record.discord_summary(result, extra)
-        if summary:
+        if summary and not state.get("done"):  # 닫은 스레드에 쓰면 다시 열린다.
             target = thread or self.get_channel(int(key))
             if target is None:
                 try:

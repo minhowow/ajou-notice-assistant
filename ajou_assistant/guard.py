@@ -8,6 +8,9 @@
   막는다. 초대 메일이 나가면 일정 내용이 밖으로 나가기 때문이다.
 - 노션: 읽기만 된다. 팀 노션은 함께 쓰는 공간이라 잘못 고치면 남의 문서가 바뀐다.
 - 그 밖의 커넥터(Gmail 등): 막는다.
+- 파일 쓰기: 쓰기는 스레드 폴더 안으로 제한되어 있지만, 그 안에서도 `.git`으로 시작하는 파일(`.gitattributes`로
+  그 폴더의 git-crypt 암호화를 끌 수 있다), `.claude` 폴더, `CLAUDE.md`(다음 대화에 지시로 읽힌다), `.mcp.json`은
+  쓰지 못하게 한다. 공지 속 숨은 지시가 남긴 파일이 나중에 규칙처럼 작동하는 것을 막는다(11/6 점검).
 
 표준 라이브러리만 쓴다. `python -I guard.py`로 실행되어 저장소 코드를 불러오지 않는다.
 """
@@ -32,6 +35,9 @@ NOTION_READ = {
 }
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 PEOPLE_KEYS = ("attendee", "guest", "invite")
+FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+FILE_MATCHER = "|".join(sorted(FILE_TOOLS))
+RULE_FILES = {"claude.md", "claude.local.md", ".mcp.json"}
 
 
 def tool_names() -> list[str]:
@@ -53,8 +59,21 @@ def people(value, inside: bool = False) -> list[str]:
     return found
 
 
+def rule_path(path: str) -> bool:
+    """git이나 Claude Code가 설정·지시로 읽는 파일이면 True. 경로 어느 단계든 본다."""
+    parts = [part for part in str(path).replace("\\", "/").split("/") if part]
+    return any(part.lower().startswith((".git", ".claude")) for part in parts) or (
+        bool(parts) and parts[-1].lower() in RULE_FILES)
+
+
 def verdict(tool: str, arguments: dict, owners: set[str]) -> str | None:
     """막을 이유를 돌려준다. 허용이면 None."""
+    if tool in FILE_TOOLS:
+        path = arguments.get("file_path") or arguments.get("notebook_path") or ""
+        if rule_path(path):
+            return ("git 설정(.git*), Claude 설정(.claude), CLAUDE.md, .mcp.json은 스레드에서 쓰지 않습니다. "
+                    "필요하면 사용자에게 맥 CLI에서 고치라고 안내하세요.")
+        return None
     if tool.startswith(CALENDAR):
         name = tool[len(CALENDAR):]
         if name == "delete_event":

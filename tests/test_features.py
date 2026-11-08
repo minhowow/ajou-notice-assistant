@@ -45,7 +45,9 @@ def test_plan_mode_adds_connectors_and_hook_but_not_api_key(monkeypatch):
     hooks = json.loads(plan[plan.index("--settings") + 1])["hooks"]["PreToolUse"]
     assert "guard.py" in hooks[0]["hooks"][0]["command"]
     api = bot.claude_command("outputs/threads/1", None, False, "chat")
-    assert "--settings" not in api and "mcp__" not in api[api.index("--allowedTools") + 1]
+    assert "mcp__" not in api[api.index("--allowedTools") + 1]
+    # API 키로 돌 때도 파일 쓰기 검사와 세션 보관 기간은 같다.
+    assert json.loads(api[api.index("--settings") + 1]) == json.loads(plan[plan.index("--settings") + 1])
     environment = bot.turn_environment(True)
     assert "ANTHROPIC_API_KEY" not in environment
     assert environment["AJOU_OWNER_EMAILS"] == "me@ajou.ac.kr,me@gmail.com"
