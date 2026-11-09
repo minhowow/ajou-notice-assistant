@@ -91,8 +91,10 @@ def share(items: dict, moment: datetime | None = None, db=None) -> dict:
                                 ExpressionAttributeValues=values, ReturnValues="ALL_OLD")
         return item, answer.get("Attributes", {})
 
+    first, *rest = items.values()
+    rows = [put(first)]  # AWS가 닿지 않으면 여기서 한 번만 기다리고 끝낸다(나머지 건마다 시간 초과를 기다리지 않게).
     with ThreadPoolExecutor(8) as pool:
-        rows = list(pool.map(put, items.values()))
+        rows += list(pool.map(put, rest))
     covered = {item.board_key for item, old in rows if "lambda_seen" in old}
     compared = [old for item, old in rows if item.board_key in covered]
     matched = sum(1 for old in compared if old.get("lambda_seen", {}).get("S", "") >= since)

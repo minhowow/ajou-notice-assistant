@@ -150,3 +150,21 @@ def test_daily_counts_come_from_the_notice_records_when_given():
     assert summary["week"] == {"runs": 1, "new": 3, "relevant": 2, "alerts": 1}
     assert [day["date"] for day in summary["days"]] == ["2026-11-05", "2026-11-06", "2026-11-09"]
     assert summary["watch_since"] == "2026-11-09T09:20:00+09:00" and "비밀" not in json.dumps(summary, ensure_ascii=False)
+
+
+def test_share_gives_up_after_the_first_failure(monkeypatch):
+    monkeypatch.setattr(cloud, "setting", lambda name, default="": "t" if name == "AJOU_AWS_TABLE" else "")
+
+    class Down:
+        calls = 0
+
+        def update_item(self, **call):
+            Down.calls += 1
+            raise TimeoutError("connect timeout")
+
+    items = {number: item("recruit", number) for number in range(50)}
+    try:
+        cloud.share(items, NOW, Down())
+    except TimeoutError:
+        pass
+    assert Down.calls == 1
