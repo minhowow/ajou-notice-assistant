@@ -370,6 +370,13 @@ Resources:
                          ecr:PutImage, ecr:UploadLayerPart, ecr:DescribeImages]
                 Resource: !GetAtt ImageRepository.Arn
 
+  # Output of each hourly collection run (ajou schedule ships it; digests and weekly reviews stay home).
+  RunLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ajou-assistant/runs
+      RetentionInDays: 14
+
   # ---------- the home server's identity (keys are made by deploy.sh, never in the template) ----------
   HomeServerUser:
     Type: AWS::IAM::User
@@ -399,6 +406,9 @@ Resources:
               - Effect: Allow
                 Action: [dynamodb:UpdateItem, dynamodb:GetItem, dynamodb:BatchGetItem, dynamodb:Query]
                 Resource: !GetAtt NoticesTable.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt RunLogs.Arn
 
 Outputs:
   BackupBucket: {Value: !Ref BackupBucket}
@@ -410,4 +420,5 @@ Outputs:
     Condition: GitHubPush
     Value: !GetAtt GitHubEcrRole.Arn
   HomeServerUser: {Value: !Ref HomeServerUser}
+  RunLogs: {Value: !Ref RunLogs}
   Dashboard: {Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/ajou-assistant-overview'}

@@ -106,3 +106,31 @@ def test_restore_only_into_an_empty_folder(tmp_path):
     assert cloud.restore(FakeS3(), "b", busy) == 1
     assert cloud.restore(FakeS3(), "b", tmp_path / "out") == 0
     assert (tmp_path / "out/.cache/ajou-assistant/threads.json").read_text() == '{"1": {}}'
+
+
+def test_run_log_goes_to_one_stream_per_day(monkeypatch):
+    values = {"AJOU_AWS_REGION": "ap-southeast-2", "AJOU_AWS_LOG_GROUP": "/ajou-assistant/runs"}
+    monkeypatch.setattr(cloud, "setting", lambda name, default="": values.get(name, ""))
+
+    class Exists(Exception):
+        pass
+
+    class FakeLogs:
+        exceptions = type("E", (), {"ResourceAlreadyExistsException": Exists})
+        calls = []
+
+        def create_log_stream(self, **call):
+            self.calls.append(("create", call))
+            raise Exists()
+
+        def put_log_events(self, **call):
+            self.calls.append(("put", call))
+
+    logs = FakeLogs()
+    cloud.ship_log("run", ["새 글 0\n", "\n", "끝 (0)"], logs)
+    put = logs.calls[-1][1]
+    assert put["logGroupName"] == "/ajou-assistant/runs" and put["logStreamName"].startswith("run-")
+    assert [event["message"] for event in put["logEvents"]] == ["새 글 0", " ", "끝 (0)"]
+    values.pop("AJOU_AWS_LOG_GROUP")
+    cloud.ship_log("run", ["x"], logs)  # 그룹이 없으면 보내지 않는다
+    assert len(logs.calls) == 2

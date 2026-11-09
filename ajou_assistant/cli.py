@@ -1114,8 +1114,17 @@ def cmd_schedule(args) -> int:
             done[job] = store.now().isoformat(timespec="seconds")
             SCHEDULE_FILE.write_text(json.dumps(done))
             print(f"{done[job]} {job} 시작", flush=True)
-            result = subprocess.run([sys.executable, "-m", "ajou_assistant.cli", job])
-            print(f"{store.now():%H:%M:%S} {job} 끝 ({result.returncode})", flush=True)
+            # 출력은 그대로 흘려보내며 모아 두었다가, 수집 실행이면 CloudWatch Logs에도 보낸다(설정이 있을 때).
+            child = subprocess.Popen([sys.executable, "-m", "ajou_assistant.cli", job], stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, bufsize=1)
+            lines = []
+            for line in child.stdout:
+                print(line, end="", flush=True)
+                lines.append(line)
+            code = child.wait()
+            print(f"{store.now():%H:%M:%S} {job} 끝 ({code})", flush=True)
+            if job == "run":
+                cloud.ship_log(job, [*lines, f"끝 ({code})"])
         time.sleep(30)
 
 

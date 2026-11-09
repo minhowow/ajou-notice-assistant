@@ -10,6 +10,7 @@
   AJOU_AWS_BACKUP_BUCKET   백업 버킷 (backup/ 아래에 쓴다)
   AJOU_AWS_SITE_BUCKET     현황 페이지 버킷 (site/status.json 하나만 쓴다)
   AJOU_AWS_TABLE           공용 수집 테이블
+  AJOU_AWS_LOG_GROUP       매시 수집 실행의 출력을 보낼 CloudWatch Logs 그룹 (요약·주간 정리는 개인 내용이라 보내지 않는다)
   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY   env 파일에 둔다. 없으면 boto3 기본 방식으로 찾는다
 인프라는 aws/stack.yaml, 설명은 README의 'AWS' 절.
 """
@@ -190,6 +191,25 @@ def after_run(started: datetime, items: dict, outcomes: list[dict], cost: float)
         except Exception as error:
             print(f"AWS 현황 실패: {type(error).__name__}: {str(error)[:160]}")
     print("AWS: " + ", ".join(f"{key} {value}" for key, value in row.items() if key not in ("at",)))
+
+
+def ship_log(job: str, lines: list[str], logs=None) -> None:
+    """수집 실행 하나의 출력을 로그 그룹의 하루치 스트림에 붙인다. 실패해도 조용히 넘어간다."""
+    group = setting("AJOU_AWS_LOG_GROUP")
+    if not enabled() or not group or not lines:
+        return
+    try:
+        logs = logs or client("logs")
+        stream = f"{job}-{store.now():%Y-%m-%d}"
+        try:
+            logs.create_log_stream(logGroupName=group, logStreamName=stream)
+        except logs.exceptions.ResourceAlreadyExistsException:
+            pass
+        stamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        events = [{"timestamp": stamp, "message": line.rstrip("\n")[:4000] or " "} for line in lines[-2000:]]
+        logs.put_log_events(logGroupName=group, logStreamName=stream, logEvents=events)
+    except Exception as error:
+        print(f"AWS 로그 실패: {type(error).__name__}: {str(error)[:160]}")
 
 
 def skip(info: tarfile.TarInfo) -> tarfile.TarInfo | None:

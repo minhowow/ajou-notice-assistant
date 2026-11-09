@@ -199,6 +199,7 @@ Restart=always
 | S3 백업 | `ajou backup`(시계가 매일 04:30)이 상태 폴더(`~/.cache/ajou-assistant`, 스레드 대응표 포함)와 Claude 세션(`~/.claude/projects`)을 압축해 올린다. 비밀값·Claude 로그인·잠금 파일은 빼고, 버전 관리·서버 측 암호화·30일 뒤 삭제 |
 | S3 + CloudFront | 매 실행이 집계 JSON(`site/status.json`, 건수만)을 올리고, 정적 현황 페이지가 그것을 보여 준다 |
 | DynamoDB + Lambda + EventBridge Scheduler | 학교 공용 수집 계층. Lambda가 매시 :05에 로그인 없이 보이는 게시판을 읽어 `ajou-assistant-notices`(키: `학교 도메인#게시판`, 글 번호)에 넣고 본문은 S3 `raw/`에 둔다. 판단과 알림은 하지 않는다. 집 서버는 :07 실행에서 읽은 목록을 같은 표에 올리고, Lambda가 맡은 게시판은 같은 시간대(2시간)에 본 글인지 맞춰 일치율을 낸다 |
+| CloudWatch Logs | `ajou schedule`이 매시 수집 실행의 출력을 `/ajou-assistant/runs`(14일 보관)에 하루 한 스트림으로 보낸다. 요약·주간 정리 출력은 개인 내용이라 보내지 않는다 |
 | ECR | 이미지 저장소 `ajou-assistant`(최근 5개만). GitHub Actions가 OIDC로 올리는 역할은 `GitHubEcr=create`일 때 만든다 |
 
 **학교가 해외 IP를 막는 경우**: 아주대는 `www.ajou.ac.kr`과 `oia.ajou.ac.kr`이 해외(시드니 Lambda)에서 접속 시간 초과로 막히고 `job.ajou.ac.kr`만 열린다(2026-11-09 확인). 그래서 Lambda는 `CollectorBoards`(기본 `program,recruit`)만 읽고, 나머지 게시판은 집 서버가 읽은 목록이 공용 표를 채운다. 다른 학교는 `aws lambda invoke`로 먼저 확인하고 이 값을 고친다.
@@ -208,7 +209,7 @@ Restart=always
 2. Discord `#system` 같은 채널에 웹후크를 만든다.
 3. `AWS_REGION=... ALERT_EMAIL=... DISCORD_WEBHOOK_URL=... sh aws/deploy.sh`. 본체 스택(`ajou-assistant-core`), 수집기 코드, 현황 페이지 파일, CloudFront 스택(`ajou-assistant-page`)을 차례로 올리고 페이지 주소를 찍는다. 메일로 온 SNS 구독 확인을 한 번 누른다.
 4. 집 서버 사용자 키: `aws iam create-access-key --user-name ajou-assistant-home`의 결과를 화면에 띄우지 말고 env 파일의 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`로 바로 넣는다. 권한은 지표 쓰기, 백업 경로 읽기·쓰기, `site/status.json` 쓰기, 공용 표 읽기·쓰기뿐이다.
-5. env 파일이나 도커 환경에 `AJOU_AWS_REGION`, `AJOU_AWS_BACKUP_BUCKET`, `AJOU_AWS_SITE_BUCKET`, `AJOU_AWS_TABLE`(스택 출력 값)을 넣는다. `AJOU_AWS_REGION`이 없으면 꺼진다. 도커 이미지는 `boto3`(`aws` 추가 의존성)를 담고 있고, 직접 설치할 때는 `uv sync --extra aws`.
+5. env 파일이나 도커 환경에 `AJOU_AWS_REGION`, `AJOU_AWS_BACKUP_BUCKET`, `AJOU_AWS_SITE_BUCKET`, `AJOU_AWS_TABLE`, `AJOU_AWS_LOG_GROUP`(스택 출력 값)을 넣는다. `AJOU_AWS_REGION`이 없으면 꺼진다. 도커 이미지는 `boto3`(`aws` 추가 의존성)를 담고 있고, 직접 설치할 때는 `uv sync --extra aws`.
 
 **복원**: `ajou backup --restore <빈 폴더>`가 가장 최근 백업(`--key`로 고를 수 있음)을 그 폴더에 푼다. 지금 파일을 덮지 않도록 빈 폴더에만 풀고, 확인한 뒤 필요한 것만 홈 폴더로 옮긴다. 데이터 폴더(`AJOU_HOME`)는 git 원격이 백업이므로 넣지 않는다.
 
