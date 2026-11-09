@@ -12,7 +12,7 @@
             --accent: #5aa6f0; --good: #4cc26a; --bad: #ff6b6b; --bar: #5aa6f0; --bar2: #3f7fbf; --bar3: #2c5a88; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
+  body { margin: 0; background: var(--bg); color: var(--text); word-break: keep-all; overflow-wrap: anywhere;
          font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
   main { max-width: 760px; margin: 0 auto; padding: 28px 16px 48px; }
   h1 { font-size: 1.5rem; margin: 0 0 4px; }
@@ -101,6 +101,17 @@ fetch("status.json", { cache: "no-store" }).then((r) => r.json()).then((s) => {
   const top = Math.max(1, ...steps.map((step) => step[1]));
   $("funnel").innerHTML = steps.map(([name, value]) =>
     `<div><span class="name">${name}</span><span class="bar" style="width:${Math.max(0.5, 70 * value / top)}%"></span><b>${value}</b></div>`).join("");
+  // 공지가 없던 날도 빈 칸으로 보이게 첫날부터 마지막 날까지 채운다(합계와 같은 기간).
+  const byDate = Object.fromEntries(s.days.map((day) => [day.date, day]));
+  const filled = [];
+  if (s.days.length) {
+    for (let at = new Date(s.days[0].date + "T12:00:00Z"); ; at = new Date(at.getTime() + 86400000)) {
+      const date = at.toISOString().slice(0, 10);
+      filled.push(byDate[date] || { date, new: 0, relevant: 0, alerts: 0 });
+      if (date >= s.days[s.days.length - 1].date) break;
+    }
+  }
+  s.days = filled;
   const peak = Math.max(1, ...s.days.map((day) => day.new));
   $("days").innerHTML = s.days.map((day) => `<div class="day" title="${day.date}: 새 ${day.new}, 관련 ${day.relevant}, 알림 ${day.alerts}">
       <i style="height:${100 * Math.max(0, day.new - day.relevant) / peak}%;background:var(--bar3)"></i>

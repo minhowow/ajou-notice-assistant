@@ -33,7 +33,7 @@ aws lambda update-function-code --function-name ajou-assistant-collector --zip-f
 aws lambda wait function-updated-v2 --function-name ajou-assistant-collector
 
 echo "3/4 현황 페이지 파일"
-aws s3 cp site/index.html "s3://$SHARED/site/index.html" --content-type 'text/html; charset=utf-8' --cache-control max-age=300 --only-show-errors
+aws s3 cp site/index.html "s3://$SHARED/site/index.html" --content-type 'text/html; charset=utf-8' --cache-control max-age=60 --only-show-errors
 
 echo "4/4 현황 페이지 스택 $PAGE"
 aws cloudformation deploy --stack-name "$PAGE" --template-file page.yaml --no-fail-on-empty-changeset \
