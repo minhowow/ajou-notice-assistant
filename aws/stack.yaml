@@ -1,0 +1,413 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ajou-notice-assistant on AWS (v0.5.0). Outside watch for the home server (metrics, dashboard,
+  "no successful run" alarm to Discord and email), daily S3 backup, a shared notice table that
+  a Lambda collector and the home server both fill, an ECR mirror of the release image, and an
+  IAM user for the home server. Stack name: ajou-assistant-core. The public status page
+  (CloudFront) is a separate stack: page.yaml. Deploy with aws/deploy.sh.
+
+Parameters:
+  BoundaryPolicyArn:
+    Type: String
+    Default: ''
+    Description: Permissions boundary for every role and user here. Empty means none.
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Alarm emails go here (confirm the subscription mail once). Empty means Discord only.
+  DiscordWebhookUrl:
+    Type: String
+    NoEcho: true
+    Description: Discord webhook for alarms and recovery
+  CollectorBoards:
+    Type: String
+    Default: program,recruit
+    Description: Board keys the Lambda collector reads (boards your school serves to overseas IPs)
+  GitHubRepo:
+    Type: String
+    Default: minhowow/ajou-notice-assistant
+    Description: Only v* tags of this repository may push to ECR
+  GitHubEcr:
+    Type: String
+    Default: create
+    AllowedValues: [create, existing-provider, 'off']
+    Description: >-
+      GitHub Actions push to ECR over OIDC. create makes the OIDC provider, existing-provider reuses one,
+      off skips both (the AWS free plan blocks iam:CreateOpenIDConnectProvider with an SCP).
+
+Conditions:
+  HasBoundary: !Not [!Equals [!Ref BoundaryPolicyArn, '']]
+  HasEmail: !Not [!Equals [!Ref AlertEmail, '']]
+  CreateOidc: !Equals [!Ref GitHubEcr, create]
+  GitHubPush: !Not [!Equals [!Ref GitHubEcr, 'off']]
+
+Resources:
+  # ---------- storage ----------
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ajou-assistant-${AWS::AccountId}-backup
+      VersioningConfiguration: {Status: Enabled}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}}]
+      PublicAccessBlockConfiguration:
+        {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+      LifecycleConfiguration:
+        Rules:
+          - Id: delete-after-30-days
+            Status: Enabled
+            Prefix: backup/
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration: {NoncurrentDays: 30}
+            AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}
+
+  # raw/: notice bodies from the Lambda collector. site/: the public status page (CloudFront reads only site/).
+  SharedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ajou-assistant-${AWS::AccountId}-shared
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}}]
+      PublicAccessBlockConfiguration:
+        {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+
+  NoticesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ajou-assistant-notices
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: source, AttributeType: S}
+        - {AttributeName: id, AttributeType: S}
+      KeySchema:
+        - {AttributeName: source, KeyType: HASH}   # <school domain>#<board key>, e.g. ajou.ac.kr#general
+        - {AttributeName: id, KeyType: RANGE}      # article id on that board
+
+  # ---------- shared collector (Lambda + EventBridge Scheduler) ----------
+  CollectorLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ajou-assistant-collector
+      RetentionInDays: 14
+
+  CollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ajou-assistant-collector
+      Path: /ajou-assistant/
+      PermissionsBoundary: !If [HasBoundary, !Ref BoundaryPolicyArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]
+      Policies:
+        - PolicyName: collector
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub ${CollectorLogs.Arn}
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt NoticesTable.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${SharedBucket.Arn}/raw/*
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition: {StringEquals: {cloudwatch:namespace: AjouAssistant}}
+
+  # The code is replaced by aws/deploy.sh (it needs httpx and beautifulsoup4).
+  Collector:
+    Type: AWS::Lambda::Function
+    DependsOn: CollectorLogs
+    Properties:
+      FunctionName: ajou-assistant-collector
+      Description: Reads public school boards into the shared notice table. No judging, no alerts.
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: collector.handler
+      MemorySize: 256
+      Timeout: 300
+      Role: !GetAtt CollectorRole.Arn
+      Environment:
+        Variables:
+          TABLE: !Ref NoticesTable
+          BUCKET: !Ref SharedBucket
+          BOARDS: !Ref CollectorBoards
+          MAX_DETAILS: '40'
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              raise RuntimeError("run aws/deploy.sh to upload the collector code")
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ajou-assistant-scheduler
+      Path: /ajou-assistant/
+      PermissionsBoundary: !If [HasBoundary, !Ref BoundaryPolicyArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: scheduler.amazonaws.com}
+            Action: sts:AssumeRole
+            Condition: {StringEquals: {aws:SourceAccount: !Ref AWS::AccountId}}
+      Policies:
+        - PolicyName: invoke-collector
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement: [{Effect: Allow, Action: lambda:InvokeFunction, Resource: !GetAtt Collector.Arn}]
+
+  # :05 every hour, two minutes before the home server's :07 run, so both see the same boards.
+  CollectorSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: ajou-assistant-collector
+      ScheduleExpression: cron(5 * * * ? *)
+      ScheduleExpressionTimezone: Asia/Seoul
+      FlexibleTimeWindow: {Mode: 'OFF'}
+      Target:
+        Arn: !GetAtt Collector.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy: {MaximumRetryAttempts: 0}
+
+  # ---------- outside watch: alarm -> SNS -> Lambda -> Discord (+ email) ----------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ajou-assistant-alarms
+
+  AlarmEmail:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  NotifierLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ajou-assistant-alarm-notify
+      RetentionInDays: 14
+
+  NotifierRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ajou-assistant-alarm-notify
+      Path: /ajou-assistant/
+      PermissionsBoundary: !If [HasBoundary, !Ref BoundaryPolicyArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}]
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - {Effect: Allow, Action: [logs:CreateLogStream, logs:PutLogEvents], Resource: !Sub '${NotifierLogs.Arn}'}
+
+  Notifier:
+    Type: AWS::Lambda::Function
+    DependsOn: NotifierLogs
+    Properties:
+      FunctionName: ajou-assistant-alarm-notify
+      Description: Posts CloudWatch alarm and recovery messages to Discord
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 20
+      Role: !GetAtt NotifierRole.Arn
+      Environment:
+        Variables:
+          WEBHOOK: !Ref DiscordWebhookUrl
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+
+          TEXT = {
+              "ALARM": "🚨 **바깥 감시 경보**: {name}\n{description}\n집 서버, 집 인터넷, 도커 컨테이너를 확인하세요. ({reason})",
+              "OK": "✅ **바깥 감시 회복**: {name}\n매시 실행이 다시 성공했습니다.",
+          }
+
+          def handler(event, context):
+              for record in event.get("Records", []):
+                  message = record["Sns"]["Message"]
+                  try:
+                      alarm = json.loads(message)
+                  except ValueError:
+                      alarm = {"NewStateValue": "ALARM", "AlarmName": record["Sns"].get("Subject") or "알림", "NewStateReason": message}
+                  state = alarm.get("NewStateValue", "")
+                  if state not in TEXT:
+                      continue
+                  text = TEXT[state].format(name=alarm.get("AlarmName", ""), description=alarm.get("AlarmDescription") or "",
+                                            reason=str(alarm.get("NewStateReason", ""))[:200])
+                  body = json.dumps({"content": text[:1900], "allowed_mentions": {"parse": []}}).encode()
+                  request = urllib.request.Request(os.environ["WEBHOOK"], data=body, headers={
+                      "Content-Type": "application/json",
+                      "User-Agent": "DiscordBot (https://github.com/minhowow/ajou-notice-assistant, 0.5)"})
+                  urllib.request.urlopen(request, timeout=10).read()
+
+  NotifierPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Notifier
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AlarmTopic
+
+  NotifierSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlarmTopic
+      Protocol: lambda
+      Endpoint: !GetAtt Notifier.Arn
+
+  # The home server sends RunSuccess=1 after every hourly run. Two hours without one, or no data at all, is an alarm.
+  NoSuccessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: ajou-assistant-no-success
+      AlarmDescription: 2시간 동안 성공한 공지 실행이 없습니다 (지표가 아예 없어도 경보).
+      Namespace: AjouAssistant
+      MetricName: RunSuccess
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlarmTopic]
+      OKActions: [!Ref AlarmTopic]
+
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: ajou-assistant-overview
+      DashboardBody: !Sub
+        - |
+          {"widgets": [
+            {"type": "text", "x": 0, "y": 0, "width": 24, "height": 2, "properties": {"markdown":
+              "## 아주대 공지 비서 · 바깥 감시\n집 서버가 매시 :07 실행 끝에 보낸 지표와, 시드니 Lambda 공용 수집기(:05)의 결과입니다. 2시간 동안 성공이 없으면 Discord와 메일로 알립니다."}},
+            {"type": "alarm", "x": 0, "y": 2, "width": 6, "height": 4, "properties": {"title": "경보", "alarms": ["${AlarmArn}"]}},
+            {"type": "metric", "x": 6, "y": 2, "width": 9, "height": 6, "properties": {"title": "매시 실행 성공", "region": "${AWS::Region}",
+              "view": "timeSeries", "stat": "Sum", "period": 3600, "metrics": [["AjouAssistant", "RunSuccess", {"label": "성공"}]],
+              "yAxis": {"left": {"min": 0, "max": 2}}}},
+            {"type": "metric", "x": 15, "y": 2, "width": 9, "height": 6, "properties": {"title": "새 공지 → 관련 → 알림 (하루 합)", "region": "${AWS::Region}",
+              "view": "bar", "stat": "Sum", "period": 86400, "metrics": [
+                ["AjouAssistant", "NewNotices", {"label": "새 공지"}], [".", "Relevant", {"label": "관련"}], [".", "Alerts", {"label": "알림"}]]}},
+            {"type": "metric", "x": 0, "y": 8, "width": 8, "height": 6, "properties": {"title": "공용 수집 일치율 (집 서버 ↔ Lambda)", "region": "${AWS::Region}",
+              "view": "timeSeries", "stat": "Average", "period": 3600, "metrics": [["AjouAssistant", "SharedMatchPercent", {"label": "일치율 %"}]],
+              "yAxis": {"left": {"min": 0, "max": 100}}}},
+            {"type": "metric", "x": 8, "y": 8, "width": 8, "height": 6, "properties": {"title": "읽은 목록 건수", "region": "${AWS::Region}",
+              "view": "timeSeries", "stat": "Average", "period": 3600, "metrics": [
+                ["AjouAssistant", "Scanned", {"label": "집 서버"}], [".", "CollectorItems", {"label": "Lambda"}]]}},
+            {"type": "metric", "x": 16, "y": 8, "width": 8, "height": 6, "properties": {"title": "실행 시간(초) · AI 비용($)", "region": "${AWS::Region}",
+              "view": "timeSeries", "period": 3600, "metrics": [
+                ["AjouAssistant", "DurationSeconds", {"stat": "Average", "label": "실행 시간"}],
+                [".", "AICostUSD", {"stat": "Sum", "label": "AI 비용", "yAxis": "right"}]]}},
+            {"type": "metric", "x": 0, "y": 14, "width": 12, "height": 5, "properties": {"title": "Lambda 수집기", "region": "${AWS::Region}",
+              "view": "timeSeries", "stat": "Sum", "period": 3600, "metrics": [
+                ["AWS/Lambda", "Invocations", "FunctionName", "ajou-assistant-collector", {"label": "실행"}],
+                [".", "Errors", ".", ".", {"label": "오류"}]]}},
+            {"type": "metric", "x": 12, "y": 14, "width": 12, "height": 5, "properties": {"title": "Lambda 수집기 시간(ms)", "region": "${AWS::Region}",
+              "view": "timeSeries", "stat": "Maximum", "period": 3600, "metrics": [
+                ["AWS/Lambda", "Duration", "FunctionName", "ajou-assistant-collector", {"label": "최대"}]]}}
+          ]}
+        - AlarmArn: !GetAtt NoSuccessAlarm.Arn
+
+  # ---------- ECR mirror pushed by GitHub Actions (OIDC, no long-lived keys) ----------
+  ImageRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ajou-assistant
+      EmptyOnDelete: true
+      ImageScanningConfiguration: {ScanOnPush: true}
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules": [{"rulePriority": 1, "description": "keep the 5 newest tagged images",
+            "selection": {"tagStatus": "tagged", "tagPatternList": ["*"], "countType": "imageCountMoreThan", "countNumber": 5},
+            "action": {"type": "expire"}}]}
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1, 1c58a3a8518e8759bf075b76b750d4f2df264fcd]
+
+  GitHubEcrRole:
+    Type: AWS::IAM::Role
+    Condition: GitHubPush
+    Properties:
+      RoleName: ajou-assistant-github-ecr
+      Path: /ajou-assistant/
+      PermissionsBoundary: !If [HasBoundary, !Ref BoundaryPolicyArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidc, !Ref GitHubOidcProvider, !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com']
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals: {token.actions.githubusercontent.com:aud: sts.amazonaws.com}
+              StringLike: {token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepo}:ref:refs/tags/v*'}
+      Policies:
+        - PolicyName: push-image
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - {Effect: Allow, Action: ecr:GetAuthorizationToken, Resource: '*'}
+              - Effect: Allow
+                Action: [ecr:BatchCheckLayerAvailability, ecr:BatchGetImage, ecr:CompleteLayerUpload, ecr:InitiateLayerUpload,
+                         ecr:PutImage, ecr:UploadLayerPart, ecr:DescribeImages]
+                Resource: !GetAtt ImageRepository.Arn
+
+  # ---------- the home server's identity (keys are made by deploy.sh, never in the template) ----------
+  HomeServerUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ajou-assistant-home
+      Path: /ajou-assistant/
+      PermissionsBoundary: !If [HasBoundary, !Ref BoundaryPolicyArn, !Ref AWS::NoValue]
+      Policies:
+        - PolicyName: home-server
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition: {StringEquals: {cloudwatch:namespace: AjouAssistant}}
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub ${BackupBucket.Arn}/backup/*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt BackupBucket.Arn
+                Condition: {StringLike: {s3:prefix: backup/*}}
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${SharedBucket.Arn}/site/status.json
+              - Effect: Allow
+                Action: [dynamodb:UpdateItem, dynamodb:GetItem, dynamodb:BatchGetItem, dynamodb:Query]
+                Resource: !GetAtt NoticesTable.Arn
+
+Outputs:
+  BackupBucket: {Value: !Ref BackupBucket}
+  SharedBucket: {Value: !Ref SharedBucket}
+  NoticesTable: {Value: !Ref NoticesTable}
+  AlarmTopic: {Value: !Ref AlarmTopic}
+  ImageRepositoryUri: {Value: !GetAtt ImageRepository.RepositoryUri}
+  GitHubEcrRoleArn:
+    Condition: GitHubPush
+    Value: !GetAtt GitHubEcrRole.Arn
+  HomeServerUser: {Value: !Ref HomeServerUser}
+  Dashboard: {Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/ajou-assistant-overview'}

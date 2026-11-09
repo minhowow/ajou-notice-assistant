@@ -40,6 +40,7 @@ flowchart LR
   C & D <--> F[(데이터 폴더 AJOU_HOME<br/>프로필 · 기록 · 산출물)]
   C -.->|선택| M[Google 캘린더<br/>Apps Script]
   F -.->|선택| J[(비공개 git 저장소)]
+  C -.->|선택: 지표 · 현황 · 공지 목록| K[AWS<br/>바깥 감시 · 백업 · 공용 수집]
 ```
 
 코드와 개인 데이터는 분리됩니다.
@@ -48,7 +49,7 @@ flowchart LR
 |---|---|
 | 이 저장소 | 코드, 시험, 예시 설정 (`examples/`), Apps Script 원본 (`google/`), 설정 도우미 (`setup/`) |
 | 데이터 폴더 (`AJOU_HOME`) | `CURRENT_PROFILE.md`, `private_facts.md`, `discord.json`, `boards.json`, `auto/`(처리 상태·분석·비용), `outputs/threads/`(스레드 산출물), `records/`(대화 기록) |
-| 저장소 밖 env 파일 | `ANTHROPIC_API_KEY`, `DISCORD_BOT_TOKEN`, (선택) `GOOGLE_BRIDGE_URL`·`GOOGLE_BRIDGE_SECRET`. 기본 `~/.config/ajou-assistant/env` |
+| 저장소 밖 env 파일 | `ANTHROPIC_API_KEY`, `DISCORD_BOT_TOKEN`, (선택) `GOOGLE_BRIDGE_URL`·`GOOGLE_BRIDGE_SECRET`, `AWS_ACCESS_KEY_ID`·`AWS_SECRET_ACCESS_KEY`. 기본 `~/.config/ajou-assistant/env` |
 
 `AJOU_HOME`을 지정하지 않으면 명령을 실행한 현재 폴더가 데이터 폴더가 됩니다. 이 저장소 안에서 실행해도 개인 파일이 올라가지 않도록 `.gitignore`가 막아 두었지만, 데이터 폴더는 따로 두는 것을 권장합니다.
 
@@ -187,6 +188,34 @@ Restart=always
 - **주간 정리**: `AJOU_WEEKLY_AREAS`(쉼표로 나눈 영역 이름, 기본 "학업,장학·진로,국제교류,영어,동아리,생활,기타"), `AJOU_DEADLINES_FILE`(함께 읽을 마감 목록, 기본 `05_deadlines.md`, 없으면 건너뜀).
 - **스레드 실행 방식**: `~/.claude/.credentials.json`에 claude.ai 로그인이 있으면 구독으로 돌고, 한도·로그인 문제면 같은 턴을 API 키로 다시 돕니다. `AJOU_THREAD_AUTH=api`로 끌 수 있습니다. 커넥터 검사가 허용할 참석자 메일은 `discord.json`의 `calendar_account`와 env의 `AJOU_OWNER_EMAILS`입니다.
 
+### 8. 선택: AWS (바깥 감시·백업·현황 페이지·공용 수집)
+
+집 서버 하나로 돌면 서버나 집 인터넷이 꺼졌을 때 알려 줄 곳이 없습니다. `aws/`에 그 빈자리를 채우는 CloudFormation 템플릿이 있습니다. 설정이 없으면 이 기능은 전부 꺼져 있고, AWS 호출이 실패해도 수집과 알림은 계속됩니다(`cloud.py`, 짧은 타임아웃, 실패는 로그만).
+
+| 서비스 | 하는 일 |
+|---|---|
+| CloudWatch 지표·대시보드 | 매 실행 끝에 성공(1/0), 읽은 목록·새 공지·관련·알림 건수, 실행 시간, AI 비용을 `AjouAssistant` 이름공간으로 보낸다. 대시보드 `ajou-assistant-overview` |
+| CloudWatch 경보 → SNS → Lambda | 2시간 동안 성공 실행이 없으면(지표가 아예 없어도) Discord 웹후크와 메일로 알리고, 회복도 알린다 |
+| S3 백업 | `ajou backup`(시계가 매일 04:30)이 상태 폴더(`~/.cache/ajou-assistant`, 스레드 대응표 포함)와 Claude 세션(`~/.claude/projects`)을 압축해 올린다. 비밀값·Claude 로그인·잠금 파일은 빼고, 버전 관리·서버 측 암호화·30일 뒤 삭제 |
+| S3 + CloudFront | 매 실행이 집계 JSON(`site/status.json`, 건수만)을 올리고, 정적 현황 페이지가 그것을 보여 준다 |
+| DynamoDB + Lambda + EventBridge Scheduler | 학교 공용 수집 계층. Lambda가 매시 :05에 로그인 없이 보이는 게시판을 읽어 `ajou-assistant-notices`(키: `학교 도메인#게시판`, 글 번호)에 넣고 본문은 S3 `raw/`에 둔다. 판단과 알림은 하지 않는다. 집 서버는 :07 실행에서 읽은 목록을 같은 표에 올리고, Lambda가 맡은 게시판은 같은 시간대(2시간)에 본 글인지 맞춰 일치율을 낸다 |
+| ECR | 이미지 저장소 `ajou-assistant`(최근 5개만). GitHub Actions가 OIDC로 올리는 역할은 `GitHubEcr=create`일 때 만든다 |
+
+**학교가 해외 IP를 막는 경우**: 아주대는 `www.ajou.ac.kr`과 `oia.ajou.ac.kr`이 해외(시드니 Lambda)에서 접속 시간 초과로 막히고 `job.ajou.ac.kr`만 열린다(2026-11-09 확인). 그래서 Lambda는 `CollectorBoards`(기본 `program,recruit`)만 읽고, 나머지 게시판은 집 서버가 읽은 목록이 공용 표를 채운다. 다른 학교는 `aws lambda invoke`로 먼저 확인하고 이 값을 고친다.
+
+**올리기**
+1. 관리자 권한이 아닌, 이 자원만 만들 수 있는 IAM 사용자로 한다. 경계 정책을 쓰면 `BOUNDARY_ARN`에 준다.
+2. Discord `#system` 같은 채널에 웹후크를 만든다.
+3. `AWS_REGION=... ALERT_EMAIL=... DISCORD_WEBHOOK_URL=... sh aws/deploy.sh`. 본체 스택(`ajou-assistant-core`), 수집기 코드, 현황 페이지 파일, CloudFront 스택(`ajou-assistant-page`)을 차례로 올리고 페이지 주소를 찍는다. 메일로 온 SNS 구독 확인을 한 번 누른다.
+4. 집 서버 사용자 키: `aws iam create-access-key --user-name ajou-assistant-home`의 결과를 화면에 띄우지 말고 env 파일의 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`로 바로 넣는다. 권한은 지표 쓰기, 백업 경로 읽기·쓰기, `site/status.json` 쓰기, 공용 표 읽기·쓰기뿐이다.
+5. env 파일이나 도커 환경에 `AJOU_AWS_REGION`, `AJOU_AWS_BACKUP_BUCKET`, `AJOU_AWS_SITE_BUCKET`, `AJOU_AWS_TABLE`(스택 출력 값)을 넣는다. `AJOU_AWS_REGION`이 없으면 꺼진다. 도커 이미지는 `boto3`(`aws` 추가 의존성)를 담고 있고, 직접 설치할 때는 `uv sync --extra aws`.
+
+**복원**: `ajou backup --restore <빈 폴더>`가 가장 최근 백업(`--key`로 고를 수 있음)을 그 폴더에 푼다. 지금 파일을 덮지 않도록 빈 폴더에만 풀고, 확인한 뒤 필요한 것만 홈 폴더로 옮긴다. 데이터 폴더(`AJOU_HOME`)는 git 원격이 백업이므로 넣지 않는다.
+
+**월 비용(학생 한 명, 시드니 단가 기준 어림)**: Lambda·Scheduler·SNS·DynamoDB·S3는 무료 구간이나 몇 센트, 사용자 지표 10개와 대시보드 1개는 상시 무료 구간(지표 10개, 대시보드 3개까지), CloudFront는 종량제로 1달러 미만. 대략 월 $0~1이다.
+
+**끄기**: `aws cloudformation delete-stack --stack-name ajou-assistant-page` 다음 `ajou-assistant-core`. 버킷은 비운 뒤에 지워진다. 집 서버는 `AJOU_AWS_REGION`만 지우면 AWS를 부르지 않는다.
+
 ## 명령
 
 ```sh
@@ -209,7 +238,9 @@ uv run ajou records-apply        # 기록의 일정·참석 응답을 다시 반
 uv run ajou --dry-run weekly     # 주간 정리 미리 보기 (화면에만, API 비용은 듦)
 uv run ajou mark 378230 track    # 관련도와 상관없이 계속 추적하고 알림을 핀 (done, skip, open은 핀을 푼다)
 uv run ajou link-reposts --dry-run # 이미 처리한 공지에서 재공지 찾아 묶기 (알림 없음)
-uv run ajou schedule             # run·digest·weekly 시계 (도커 기본 명령)
+uv run ajou schedule             # run·digest·weekly·backup 시계 (도커 기본 명령)
+uv run ajou backup               # 상태 폴더와 Claude 세션을 S3에 백업 (AWS 설정이 있을 때)
+uv run ajou backup --restore /tmp/restore   # 가장 최근 백업을 빈 폴더에 풀기
 uv run ajou-bot                  # 스레드 봇
 uv run pytest -q                 # 시험
 ```

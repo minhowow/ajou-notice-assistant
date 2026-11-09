@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ajou-notice-assistant public status page (v0.5.0). CloudFront (HTTPS, origin access control) in front of
+  site/ in the shared bucket of ajou-assistant-core. The page shows only counts (no titles, no profile).
+  Stack name: ajou-assistant-page. Kept apart from the core stack so a CloudFront limit on a new account
+  cannot roll back the rest.
+
+Parameters:
+  SharedBucket:
+    Type: String
+    Description: SharedBucket output of ajou-assistant-core
+
+Resources:
+  PageAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: ajou-assistant-page
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Page:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: ajou-assistant status page
+        Enabled: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_200   # includes Korea and Japan edges
+        DefaultRootObject: index.html
+        Origins:
+          - Id: site
+            DomainName: !Sub ${SharedBucket}.s3.${AWS::Region}.amazonaws.com
+            OriginPath: /site
+            OriginAccessControlId: !GetAtt PageAccess.Id
+            S3OriginConfig: {OriginAccessIdentity: ''}
+        DefaultCacheBehavior:
+          TargetOriginId: site
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # Managed-CachingOptimized (honours max-age=60 on status.json)
+
+  PageReadsSiteOnly:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SharedBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${SharedBucket}/site/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Page}
+
+Outputs:
+  PageUrl: {Value: !Sub 'https://${Page.DomainName}/'}

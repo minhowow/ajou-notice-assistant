@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>공지 비서 현황</title>
+<style>
+  :root { --bg: #f7f7f5; --card: #ffffff; --text: #1d1d1f; --muted: #6b6b70; --line: #e4e4e0;
+          --accent: #0b6bcb; --good: #1a7f37; --bad: #c62828; --bar: #0b6bcb; --bar2: #5a9bd8; --bar3: #a9c9ea; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141416; --card: #1d1d20; --text: #ececee; --muted: #9a9aa2; --line: #2e2e33;
+            --accent: #5aa6f0; --good: #4cc26a; --bad: #ff6b6b; --bar: #5aa6f0; --bar2: #3f7fbf; --bar3: #2c5a88; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; font-size: .95rem; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .label { color: var(--muted); font-size: .85rem; }
+  .big { font-size: 1.9rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ok { color: var(--good); } .fail { color: var(--bad); }
+  section { margin-top: 16px; }
+  h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  .funnel div { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .funnel span.name { width: 64px; color: var(--muted); font-size: .9rem; }
+  .funnel span.bar { height: 22px; border-radius: 4px; background: var(--bar); min-width: 2px; }
+  .funnel b { font-variant-numeric: tabular-nums; }
+  .days { display: flex; align-items: flex-end; gap: 8px; height: 140px; border-bottom: 1px solid var(--line); }
+  .day { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; height: 100%; }
+  .day i { display: block; border-radius: 3px 3px 0 0; }
+  .ticks { display: flex; gap: 8px; margin-top: 4px; }
+  .ticks span { flex: 1; text-align: center; color: var(--muted); font-size: .75rem; }
+  .legend { display: flex; gap: 14px; color: var(--muted); font-size: .8rem; margin-top: 8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  ul.how { margin: 0; padding-left: 18px; color: var(--muted); font-size: .92rem; }
+  footer { margin-top: 24px; color: var(--muted); font-size: .8rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>아주대 공지 비서 · 운영 현황</h1>
+  <p class="sub">학교 공지를 매시간 읽고, 한 학생의 상황에 맞는 것만 골라 Discord로 알립니다. 이 페이지에는 건수만 나옵니다.</p>
+
+  <div class="grid">
+    <div class="card"><div class="label">마지막 실행</div><div class="big" id="last">–</div><div class="label" id="lastNote"></div></div>
+    <div class="card"><div class="label">7일 가동률 (성공한 시간 비율)</div><div class="big" id="uptime">–</div><div class="label" id="runs"></div></div>
+    <div class="card"><div class="label">공용 수집 일치율 (7일)</div><div class="big" id="match">–</div><div class="label" id="matchNote"></div></div>
+  </div>
+
+  <section class="card">
+    <h2>최근 7일: 새 공지 → 관련 → 알림</h2>
+    <div class="funnel" id="funnel"></div>
+  </section>
+
+  <section class="card">
+    <h2>날짜별</h2>
+    <div class="days" id="days"></div>
+    <div class="ticks" id="ticks"></div>
+    <div class="legend"><span><i style="background:var(--bar3)"></i>새 공지</span><span><i style="background:var(--bar2)"></i>관련</span><span><i style="background:var(--bar)"></i>알림</span></div>
+  </section>
+
+  <section class="card">
+    <h2>어떻게 도나</h2>
+    <ul class="how">
+      <li>집 서버가 매시 :07에 게시판을 읽고 AI로 판단해 알립니다. 판단과 개인 정보는 집 서버에만 있습니다.</li>
+      <li>AWS 시드니 리전의 Lambda가 매시 :05에 해외에서 열리는 게시판을 따로 읽어 공용 표(DynamoDB)에 넣습니다. 학교 본 사이트처럼 해외 접속을 막는 곳은 집 서버가 읽은 목록을 같은 표에 올립니다. 일치율은 두 쪽이 같은 시간대에 같은 글을 봤는지를 잽니다.</li>
+      <li>집 서버나 집 인터넷이 꺼져 2시간 동안 성공 실행이 없으면 AWS가 Discord와 메일로 알립니다.</li>
+    </ul>
+  </section>
+
+  <footer>갱신 <span id="updated">–</span> · <a href="https://github.com/minhowow/ajou-notice-assistant">소스 코드</a></footer>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const ago = (iso) => {
+  const minutes = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (minutes < 1) return "방금";
+  if (minutes < 60) return `${minutes}분 전`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 48 ? `${hours}시간 전` : `${Math.floor(hours / 24)}일 전`;
+};
+const time = (iso) => new Date(iso).toLocaleString("ko-KR", { timeZone: "Asia/Seoul", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+fetch("status.json", { cache: "no-store" }).then((r) => r.json()).then((s) => {
+  if (s.last_run) {
+    $("last").textContent = ago(s.last_run.at);
+    $("last").className = "big " + (s.last_run.ok ? "ok" : "fail");
+    $("lastNote").textContent = `${time(s.last_run.at)} · ${s.last_run.ok ? "성공" : "실패"} · 목록 ${s.last_run.scanned}건 · ${Math.round(s.last_run.seconds)}초`;
+  }
+  $("uptime").textContent = `${s.uptime_percent}%`;
+  $("runs").textContent = `7일 실행 ${s.week.runs}번`;
+  const shared = s.shared || {};
+  $("match").textContent = shared.match_percent == null ? "준비 중" : `${shared.match_percent}%`;
+  $("matchNote").textContent = shared.lambda_boards ? `Lambda 게시판 ${shared.lambda_boards}곳 · 실행마다 ${shared.items_per_run}건 공유` : "";
+  const steps = [["새 공지", s.week.new], ["관련", s.week.relevant], ["알림", s.week.alerts]];
+  const top = Math.max(1, ...steps.map((step) => step[1]));
+  $("funnel").innerHTML = steps.map(([name, value]) =>
+    `<div><span class="name">${name}</span><span class="bar" style="width:${Math.max(0.5, 70 * value / top)}%"></span><b>${value}</b></div>`).join("");
+  const peak = Math.max(1, ...s.days.map((day) => day.new));
+  $("days").innerHTML = s.days.map((day) => `<div class="day" title="${day.date}: 새 ${day.new}, 관련 ${day.relevant}, 알림 ${day.alerts}">
+      <i style="height:${100 * Math.max(0, day.new - day.relevant) / peak}%;background:var(--bar3)"></i>
+      <i style="height:${100 * Math.max(0, day.relevant - day.alerts) / peak}%;background:var(--bar2)"></i>
+      <i style="height:${100 * day.alerts / peak}%;background:var(--bar)"></i></div>`).join("");
+  $("ticks").innerHTML = s.days.map((day) => `<span>${day.date.slice(5).replace("-", "/")}</span>`).join("");
+  $("updated").textContent = time(s.updated);
+}).catch(() => { $("last").textContent = "불러오지 못함"; });
+</script>
+</body>
+</html>

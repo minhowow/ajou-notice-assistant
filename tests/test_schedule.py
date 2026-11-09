@@ -28,3 +28,11 @@ def test_missed_turns_run_once_after_downtime():
     assert due_jobs(at("2026-11-03T23:00"), done) == ["run", "digest"]
     done = {"run": "2026-11-08T23:07:00+09:00", "digest": "2026-11-08T21:30:00+09:00", "weekly": "2026-11-01T21:00:00+09:00"}
     assert due_jobs(at("2026-11-08T23:10"), done) == ["weekly"]
+
+
+def test_backup_runs_once_a_day_at_half_past_four():
+    assert last_slot("backup", at("2026-11-09T04:29")) == at("2026-11-08T04:30")
+    assert last_slot("backup", at("2026-11-09T04:30")) == at("2026-11-09T04:30")
+    done = {"run": "2026-11-09T04:07:00+09:00", "digest": "2026-11-08T21:30:00+09:00",
+            "weekly": "2026-11-08T21:00:00+09:00", "backup": "2026-11-08T04:30:10+09:00"}
+    assert due_jobs(at("2026-11-09T04:31"), done) == ["backup"]

@@ -1,6 +1,6 @@
 [project]
 name = "ajou-assistant"
-version = "0.4.6"
+version = "0.5.0"
 description = "학교 공지 수집·개인화 판단·Discord 알림 (기본 수집처는 아주대)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,6 +14,9 @@ dependencies = [
   "pydantic>=2",
   "xlrd>=2",
 ]
+
+[project.optional-dependencies]
+aws = ["boto3>=1.35"]  # cloud.py: 지표·현황·공용 수집 테이블·백업. 설정이 없으면 쓰지 않는다
 
 [project.scripts]
 ajou = "ajou_assistant.cli:main"

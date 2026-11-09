@@ -18,9 +18,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_CODE_VERSION" \
 COPY --from=ghcr.io/astral-sh/uv:0.12.17 /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --extra aws --no-install-project
 COPY ajou_assistant ./ajou_assistant
-RUN uv sync --frozen --no-dev && chmod -R a+rX /app
+RUN uv sync --frozen --no-dev --extra aws && chmod -R a+rX /app
 
 ENV PATH=/app/.venv/bin:/usr/local/bin:/usr/bin:/bin \
     PYTHONUNBUFFERED=1 \

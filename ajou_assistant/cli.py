@@ -13,7 +13,8 @@
   ajou google-check             학교 계정 연결 확인
   ajou calendar-add 제목 날짜 [시각] [--minutes 분] [--notes 메모]
   ajou link-reposts [--dry-run]  이미 처리한 공지에서 재공지를 찾아 처음 공지에 묶는다 (repost.py)
-  ajou schedule                 run(매시 :07)·digest(21:30)·weekly(일 21:00)를 계속 돌린다 (도커용)
+  ajou schedule                 run(매시 :07)·digest(21:30)·weekly(일 21:00)·backup(04:30)을 계속 돌린다 (도커용)
+  ajou backup [--restore 폴더]   상태 폴더와 Claude 세션을 S3에 올리거나 빈 폴더에 푼다 (AWS 설정이 있을 때, cloud.py)
 
 수집 원칙: 글은 완료로 기록되기 전까지 계속 다시 시도한다. 학교·AI·Discord 장애는 글 탓이
 아니므로 시도 횟수에 넣지 않는다. 전송 뒤 기록 전에 꺼지면 다시 보내므로 중복은 있어도 누락은 없다.
@@ -34,7 +35,7 @@ from datetime import date, datetime, timedelta
 import anthropic
 import httpx
 
-from . import english, handoff, repost, store
+from . import cloud, english, handoff, repost, store
 from .config import (
     BOARDS, HEARTBEAT_DIR, LIST_PAGE_SIZE, SESSIONS_FILE, STATE_DIR, Board, SetupError, load_discord, load_secrets, setting,
 )
@@ -461,6 +462,7 @@ def send_reminders(discord: Discord, today: date) -> int:
 def cmd_run(args) -> int:
     preflight()
     moment = store.now()
+    outcomes: list[dict] = []
     today = moment.date()
     client, discord = make_clients(args.dry_run)
     if args.standby:
@@ -537,6 +539,7 @@ def cmd_run(args) -> int:
         school_down = 0
         spent += outcome["cost"]
         done += 1
+        outcomes.append(outcome)
         if outcome.get("hash"):
             hashes.setdefault(outcome["hash"], item.article_id)
         if not args.dry_run:
@@ -560,6 +563,7 @@ def cmd_run(args) -> int:
         message = f"auto: 공지 {done}건 처리"
         push_error = sync_all(message) if args.standby else sync_push(message)
         alert_state("git-push", bool(push_error), f"git push 실패: {push_error}", discord)
+        cloud.after_run(moment, items, outcomes, spent)
     print(f"새 글 {len(new)}, 수정 {len(changed)}, 재시도 {len(retry)}, 처리 {done}, 오류 {len(ai_errors)}, 장애 {sorted(outage)}, 독촉 {reminders}, 비용 ${spent:.3f}")
     return 1 if failures or ai_errors or outage else 0
 
@@ -1073,7 +1077,7 @@ def cmd_weekly(args) -> int:
 # 켜질 때 한 번만 돈다(systemd의 Persistent=true와 같다). 각 명령은 따로 프로세스로 띄워, 한 번의
 # 실패나 메모리 문제가 시계를 멈추지 않게 한다. 명령끼리는 run.lock으로 겹치지 않는다.
 SCHEDULE_FILE = STATE_DIR / "schedule.json"
-SCHEDULE_JOBS = ("run", "digest", "weekly")
+SCHEDULE_JOBS = ("run", "digest", "weekly", "backup")
 
 
 def last_slot(job: str, moment: datetime) -> datetime:
@@ -1081,15 +1085,16 @@ def last_slot(job: str, moment: datetime) -> datetime:
     if job == "run":
         slot = moment.replace(minute=7, second=0, microsecond=0)
         return slot if moment >= slot else slot - timedelta(hours=1)
-    if job == "digest":
-        slot = moment.replace(hour=21, minute=30, second=0, microsecond=0)
+    if job in ("digest", "backup"):
+        hour, minute = (21, 30) if job == "digest" else (4, 30)
+        slot = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return slot if moment >= slot else slot - timedelta(days=1)
     slot = (moment - timedelta(days=(moment.weekday() - 6) % 7)).replace(hour=21, minute=0, second=0, microsecond=0)
     return slot if moment >= slot else slot - timedelta(days=7)
 
 
 def due_jobs(moment: datetime, done: dict[str, str]) -> list[str]:
-    return [job for job in SCHEDULE_JOBS if datetime.fromisoformat(done[job]) < last_slot(job, moment)]
+    return [job for job in SCHEDULE_JOBS if job in done and datetime.fromisoformat(done[job]) < last_slot(job, moment)]
 
 
 def cmd_schedule(args) -> int:
@@ -1221,11 +1226,15 @@ def main() -> int:
     opener = commands.add_parser("open", help="Discord 스레드를 이 컴퓨터의 Claude Code로 가져와 이어 한다")
     opener.add_argument("thread", nargs="?", default="", help="목록 번호나 스레드 번호. 없으면 목록에서 고른다")
     opener.set_defaults(func=handoff.open_main)
+    backup = commands.add_parser("backup", help="상태 폴더와 Claude 세션을 S3에 백업 (AWS 설정이 있을 때)")
+    backup.add_argument("--restore", default="", help="이 빈 폴더에 가장 최근 백업을 푼다")
+    backup.add_argument("--key", default="", help="풀 백업 객체 (기본은 가장 최근)")
+    backup.set_defaults(func=cloud.backup_main)
     args = parser.parse_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 넘겨받기는 공지 실행과 상관없이
     # 언제든 돼야 하고 스레드마다 따로 잠근다(handoff.held).
-    if args.func in (cmd_schedule, handoff.lease_main, handoff.open_main):
+    if args.func in (cmd_schedule, handoff.lease_main, handoff.open_main, cloud.backup_main):
         return args.func(args)
     with (STATE_DIR / "run.lock").open("w") as lock:
         try:
