@@ -117,17 +117,35 @@ def metrics(row: dict) -> list[dict]:
     return [{"MetricName": name, "Value": float(value), "Unit": unit} for name, value, unit in data]
 
 
-def summarize(rows: list[dict], now: datetime) -> dict:
-    """현황 페이지용 7일 집계. 공지 제목·프로필·개인정보는 넣지 않는다."""
+def summarize(rows: list[dict], now: datetime, notices: list[dict] | None = None) -> dict:
+    """현황 페이지용 7일 집계. 공지 제목·프로필·개인정보는 넣지 않는다.
+
+    rows는 이 기능을 켠 뒤의 실행 기록(가동률·일치율), notices는 공지 분석 기록이다. notices를 주면
+    날짜별 새 공지·관련·알림 건수를 분석 기록에서 센다(켜기 전 날짜도 실제 처리 기록으로 채워진다).
+    옛 글 일괄 분석(backfill)과 수정된 글의 재분석은 세지 않는다.
+    """
     since = now - timedelta(days=7)
     recent = [row for row in rows if datetime.fromisoformat(row["at"]) >= since]
     days: dict[str, dict] = {}
+
+    def day_of(stamp: str) -> dict:
+        return days.setdefault(stamp[:10], {"date": stamp[:10], "runs": 0, "ok": 0, "new": 0, "relevant": 0, "alerts": 0})
+
     for row in recent:
-        day = days.setdefault(row["at"][:10], {"date": row["at"][:10], "runs": 0, "ok": 0, "new": 0, "relevant": 0, "alerts": 0})
+        day = day_of(row["at"])
         day["runs"] += 1
         day["ok"] += 1 if row["ok"] else 0
-        for key in ("new", "relevant", "alerts"):
-            day[key] += row.get(key, 0)
+        if notices is None:
+            for key in ("new", "relevant", "alerts"):
+                day[key] += row.get(key, 0)
+    for notice in notices or []:
+        stamp = notice.get("analyzed_at", "")
+        if not stamp or notice.get("backfill") or notice.get("changed") or datetime.fromisoformat(stamp) < since:
+            continue
+        day = day_of(stamp)
+        day["new"] += 1
+        day["relevant"] += 1 if (notice.get("analysis") or {}).get("relevance") in RELEVANT else 0
+        day["alerts"] += 1 if notice.get("channel") else 0
     ok_hours = {row["at"][:13] for row in recent if row["ok"]}
     first = min((datetime.fromisoformat(row["at"]) for row in recent), default=now)
     expected = max(1, min(168, int((now - first).total_seconds() // 3600) + 1))
@@ -137,6 +155,7 @@ def summarize(rows: list[dict], now: datetime) -> dict:
     shared_last = next((row for row in reversed(recent) if row.get("compared")), None)
     return {
         "updated": now.isoformat(timespec="seconds"),
+        "watch_since": recent[0]["at"] if recent else None,
         "last_run": {"at": last["at"], "ok": last["ok"], "seconds": last["seconds"], "scanned": last["scanned"]} if last else None,
         "uptime_percent": round(100 * min(len(ok_hours), expected) / expected, 1),
         "week": {key: sum(day[key] for day in days.values()) for key in ("runs", "new", "relevant", "alerts")},
@@ -185,7 +204,7 @@ def after_run(started: datetime, items: dict, outcomes: list[dict], cost: float)
     bucket = setting("AJOU_AWS_SITE_BUCKET")
     if bucket:
         try:
-            body = json.dumps(summarize(rows, store.now()), ensure_ascii=False).encode()
+            body = json.dumps(summarize(rows, store.now(), store.recent_analysis(2)), ensure_ascii=False).encode()
             client("s3").put_object(Bucket=bucket, Key="site/status.json", Body=body, ContentType="application/json",
                                     CacheControl="max-age=60")
         except Exception as error:

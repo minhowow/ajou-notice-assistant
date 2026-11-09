@@ -48,7 +48,7 @@
 
   <div class="grid">
     <div class="card"><div class="label">마지막 실행</div><div class="big" id="last">–</div><div class="label" id="lastNote"></div></div>
-    <div class="card"><div class="label">7일 가동률 (성공한 시간 비율)</div><div class="big" id="uptime">–</div><div class="label" id="runs"></div></div>
+    <div class="card"><div class="label">가동률 (성공한 시간 비율, 최근 7일)</div><div class="big" id="uptime">–</div><div class="label" id="runs"></div></div>
     <div class="card"><div class="label">공용 수집 일치율 (7일)</div><div class="big" id="match">–</div><div class="label" id="matchNote"></div></div>
   </div>
 
@@ -93,7 +93,7 @@ fetch("status.json", { cache: "no-store" }).then((r) => r.json()).then((s) => {
     $("lastNote").textContent = `${time(s.last_run.at)} · ${s.last_run.ok ? "성공" : "실패"} · 목록 ${s.last_run.scanned}건 · ${Math.round(s.last_run.seconds)}초`;
   }
   $("uptime").textContent = `${s.uptime_percent}%`;
-  $("runs").textContent = `7일 실행 ${s.week.runs}번`;
+  $("runs").textContent = s.watch_since ? `${time(s.watch_since)}부터 잼 · 실행 ${s.week.runs}번` : "";
   const shared = s.shared || {};
   $("match").textContent = shared.match_percent == null ? "준비 중" : `${shared.match_percent}%`;
   $("matchNote").textContent = shared.lambda_boards ? `Lambda 게시판 ${shared.lambda_boards}곳 · 실행마다 ${shared.items_per_run}건 공유` : "";

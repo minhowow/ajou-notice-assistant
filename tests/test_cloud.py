@@ -134,3 +134,19 @@ def test_run_log_goes_to_one_stream_per_day(monkeypatch):
     values.pop("AJOU_AWS_LOG_GROUP")
     cloud.ship_log("run", ["x"], logs)  # 그룹이 없으면 보내지 않는다
     assert len(logs.calls) == 2
+
+
+def test_daily_counts_come_from_the_notice_records_when_given():
+    rows = [{"at": "2026-11-09T09:20:00+09:00", "ok": True, "scanned": 159, "new": 0, "relevant": 0, "alerts": 0, "seconds": 23.0}]
+    notices = [
+        {"analyzed_at": "2026-11-05T10:07:40+09:00", "channel": "scholarship", "analysis": {"relevance": "high"}, "title": "비밀"},
+        {"analyzed_at": "2026-11-05T11:07:40+09:00", "channel": None, "analysis": {"relevance": "low"}},
+        {"analyzed_at": "2026-11-06T11:07:40+09:00", "channel": None, "analysis": {"relevance": "medium"}},
+        {"analyzed_at": "2026-11-06T12:00:00+09:00", "backfill": True, "channel": "general", "analysis": {"relevance": "high"}},
+        {"analyzed_at": "2026-11-06T13:00:00+09:00", "changed": True, "channel": "general", "analysis": {"relevance": "high"}},
+        {"analyzed_at": "2026-10-20T10:00:00+09:00", "channel": "general", "analysis": {"relevance": "high"}},
+    ]
+    summary = cloud.summarize(rows, datetime(2026, 11, 9, 9, 30, tzinfo=KST), notices)
+    assert summary["week"] == {"runs": 1, "new": 3, "relevant": 2, "alerts": 1}
+    assert [day["date"] for day in summary["days"]] == ["2026-11-05", "2026-11-06", "2026-11-09"]
+    assert summary["watch_since"] == "2026-11-09T09:20:00+09:00" and "비밀" not in json.dumps(summary, ensure_ascii=False)

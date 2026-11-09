@@ -1,6 +1,6 @@
 [project]
 name = "ajou-assistant"
-version = "0.5.1"
+version = "0.5.2"
 description = "학교 공지 수집·개인화 판단·Discord 알림 (기본 수집처는 아주대)"
 readme = "README.md"
 requires-python = ">=3.12"
