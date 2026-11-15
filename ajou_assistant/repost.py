@@ -194,9 +194,21 @@ BADGE_NAME = "🔁 재공지"
 def badge(embed: dict, count: int, date: str, changes: str) -> dict:
     """처음 알림 카드에 붙이는 재공지 표시. 같은 이름의 칸이 있으면 바꾼다(알림을 새로 쌓지 않는다)."""
     value = f"{count}번째 공지" + (f" · {date}" if date else "") + (f" · {changes}" if changes else " · 내용 같음")
-    fields = [field for field in embed.get("fields", []) if field.get("name") != BADGE_NAME]
-    fields.insert(0, {"name": BADGE_NAME, "value": value[:1024], "inline": False})
-    return {**embed, "fields": fields[:25]}
+    # 읽어 온 임베드에는 Discord가 붙인 읽기 전용 칸이 섞인다. 보낼 수 있는 칸만 다시 보낸다.
+    kept = {key: embed[key] for key in ("title", "description", "url", "color", "footer", "author", "timestamp") if key in embed}
+    for key in ("image", "thumbnail"):
+        if (embed.get(key) or {}).get("url"):
+            kept[key] = {"url": embed[key]["url"]}
+    fields = [{name: field[name] for name in ("name", "value", "inline") if name in field}
+              for field in embed.get("fields", []) if field.get("name") != BADGE_NAME]
+    fields.insert(0, {"name": BADGE_NAME, "value": value[:300], "inline": False})
+    kept["fields"] = fields[:25]
+    # 전체 6000자 한도: 넘으면 요약을 줄인다(notify.fit_embed와 같은 규칙).
+    size = sum(len(str(kept.get(key) or "")) for key in ("title", "description")) + len((kept.get("footer") or {}).get("text", ""))
+    size += sum(len(field["name"]) + len(field["value"]) for field in kept["fields"])
+    if size > 5900 and kept.get("description"):
+        kept["description"] = kept["description"][:max(200, len(kept["description"]) - (size - 5900))]
+    return kept
 
 
 def note_id(text: str) -> str | None:
