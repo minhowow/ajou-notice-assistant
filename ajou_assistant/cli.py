@@ -35,7 +35,7 @@ from datetime import date, datetime, timedelta
 import anthropic
 import httpx
 
-from . import cloud, english, handoff, repost, store
+from . import cloud, english, repost, store
 from .config import (
     BOARDS, HEARTBEAT_DIR, LIST_PAGE_SIZE, SESSIONS_FILE, STATE_DIR, Board, SetupError, load_discord, load_secrets, setting,
 )
@@ -1227,23 +1227,14 @@ def main() -> int:
     check.add_argument("--title", default="")
     check.add_argument("--effort", default="low")
     check.set_defaults(func=cmd_check)
-    lease = commands.add_parser("lease", help="스레드 넘겨받기 잠금 (봇이 도는 곳에서 ajou open이 부른다)")
-    lease.add_argument("action", choices=["list", "take", "give", "note"])
-    lease.add_argument("key", nargs="?", default="")
-    lease.add_argument("token", nargs="?", default="")
-    lease.set_defaults(func=handoff.lease_main)
-    opener = commands.add_parser("open", help="Discord 스레드를 이 컴퓨터의 Claude Code로 가져와 이어 한다")
-    opener.add_argument("thread", nargs="?", default="", help="목록 번호나 스레드 번호. 없으면 목록에서 고른다")
-    opener.set_defaults(func=handoff.open_main)
     backup = commands.add_parser("backup", help="상태 폴더와 Claude 세션을 S3에 백업 (AWS 설정이 있을 때)")
     backup.add_argument("--restore", default="", help="이 빈 폴더에 가장 최근 백업을 푼다")
     backup.add_argument("--key", default="", help="풀 백업 객체 (기본은 가장 최근)")
     backup.set_defaults(func=cloud.backup_main)
     args = parser.parse_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 넘겨받기는 공지 실행과 상관없이
-    # 언제든 돼야 하고 스레드마다 따로 잠근다(handoff.held).
-    if args.func in (cmd_schedule, handoff.lease_main, handoff.open_main, cloud.backup_main):
+    # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 백업은 공지 실행과 상관없이 돈다.
+    if args.func in (cmd_schedule, cloud.backup_main):
         return args.func(args)
     with (STATE_DIR / "run.lock").open("w") as lock:
         try:

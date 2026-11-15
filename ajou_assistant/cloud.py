@@ -34,7 +34,7 @@ KEEP_RUNS = 24 * 31
 WINDOW = timedelta(hours=2)  # 이 안에 Lambda가 본 글을 '같은 시간대'로 친다
 RELEVANT = ("high", "medium")
 BACKUP_PARTS = (".cache/ajou-assistant", ".claude/projects", ".claude/settings.json")
-BACKUP_SKIP = {"locks", "leases", ".credentials.json"}
+BACKUP_SKIP = {"locks", ".credentials.json"}
 
 
 def enabled() -> bool:
