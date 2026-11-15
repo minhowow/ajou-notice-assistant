@@ -4,14 +4,19 @@
   "exceptionLogging": "STACKDRIVER",
   "dependencies": {
     "enabledAdvancedServices": [
-      { "userSymbol": "Gmail", "version": "v1", "serviceId": "gmail" },
-      { "userSymbol": "Calendar", "version": "v3", "serviceId": "calendar" }
+      {
+        "userSymbol": "Calendar",
+        "version": "v3",
+        "serviceId": "calendar"
+      }
     ]
   },
   "oauthScopes": [
     "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/userinfo.email"
   ],
-  "webapp": { "executeAs": "USER_DEPLOYING", "access": "ANYONE_ANONYMOUS" }
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
 }

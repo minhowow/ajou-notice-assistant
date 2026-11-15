@@ -1,9 +1,8 @@
 // 아주대 학교 계정에서 실행하는 연결 스크립트.
-// Google Cloud 프로젝트 없이 캘린더와 메일을 다룬다. 메일은 읽기 전용 권한이라 보낼 수 없다.
+// Google Cloud 프로젝트 없이 캘린더만 다룬다. 3판(v0.6.1)부터 메일 권한과 메일 검색을 뺐다. 메일은 claude.ai Gmail 커넥터로 읽는다.
 // __SECRET__ 은 setup 스크립트가 실제 값으로 바꾼다. 이 파일을 공유하지 않는다.
 const SECRET = '__SECRET__';
-const VERSION = 2;
-const MAX_MAILS = 30;
+const VERSION = 3;
 const CALENDAR = 'primary';
 
 function doPost(e) {
@@ -93,30 +92,4 @@ const ACTIONS = {
     Calendar.Events.remove(CALENDAR, body.id, { sendUpdates: 'none' });
     return { removed: true, id: body.id };
   },
-
-  mail_search: (body) => {
-    const limit = Math.min(body.limit || 10, MAX_MAILS);
-    const listed = Gmail.Users.Messages.list('me', { q: body.query, maxResults: limit }).messages || [];
-    return listed.map((row) => {
-      const message = Gmail.Users.Messages.get('me', row.id, { format: 'full' });
-      const header = (name) => (message.payload.headers.find((item) => item.name.toLowerCase() === name) || {}).value || '';
-      return {
-        id: message.id, from: header('from'), subject: header('subject'), date: header('date'),
-        snippet: message.snippet, body: plainText(message.payload).slice(0, 20000),
-        attachments: attachmentNames(message.payload),
-      };
-    });
-  },
 };
-
-function plainText(part) {
-  if (part.mimeType === 'text/plain' && part.body && part.body.data) {
-    return Utilities.newBlob(Utilities.base64DecodeWebSafe(part.body.data)).getDataAsString('UTF-8');
-  }
-  return (part.parts || []).map(plainText).join('\n');
-}
-
-function attachmentNames(part) {
-  const own = part.filename ? [part.filename] : [];
-  return own.concat(...(part.parts || []).map(attachmentNames));
-}
