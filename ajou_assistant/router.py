@@ -20,6 +20,9 @@ from .store import KST
 
 ROUTER_MODEL = "claude-haiku-5-5"
 MAX_CANDIDATES = 60
+# 종류마다 상한을 둔다. 11/15 실제 후보 60개 중 50개가 일정이라 스레드·공지가 밀렸다.
+KIND_LIMITS = {"thread": 20, "notice": 20, "mail": 10, "event": 15}
+MARKER_PREFIXES = ("[마감]", "[접수 시작]")
 RECENT_DAYS = 30
 RELEVANT = ("high", "medium")
 
@@ -129,11 +132,19 @@ def candidates(sessions: dict, notices: list[dict], closed: set, mail_cards: dic
         if start is None or not row.get("id") or row.get("status") == "declined" or str(row["id"]) in threaded_events:
             continue
         title = str(row.get("title") or "일정")
+        # 비서가 공지에서 넣은 일정(마감 표시 등)은 그 공지 카드가 주제다. 종일 일정도 할 일 표시라 뺀다.
+        if row.get("key") or row.get("allDay") or title.startswith(MARKER_PREFIXES):
+            continue
         found.append((start, Topic(f"event:{row['id']}", "event", title, f"일정 · {title} · {start:%m/%d %H:%M}",
                                    event={name: row.get(name, "") for name in ("id", "title", "start", "end", "location")})))
     # 일정은 지금과 가까운 것, 나머지는 최근 것이 앞에 오게 섞는다.
     found.sort(key=lambda pair: abs((pair[0] - now).total_seconds()))
-    return [topic for _, topic in found[:MAX_CANDIDATES]]
+    kept, counts = [], {}
+    for _, topic in found:
+        counts[topic.kind] = counts.get(topic.kind, 0) + 1
+        if counts[topic.kind] <= KIND_LIMITS.get(topic.kind, MAX_CANDIDATES):
+            kept.append(topic)
+    return kept[:MAX_CANDIDATES]
 
 
 def route(client: anthropic.Anthropic, text: str, topics: list[Topic], now: datetime) -> Decision:

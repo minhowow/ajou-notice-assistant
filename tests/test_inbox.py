@@ -37,6 +37,13 @@ def test_candidates_come_from_code_and_skip_closed_old_and_duplicated_topics():
     keys = {topic.key for topic in topics}
     assert keys == {"thread:100", "thread:103", "card:800:556", "card:900:901", "event:ev2"}
     by_key = {topic.key: topic for topic in topics}
+    many = [{"id": f"x{n}", "title": f"약속 {n}", "start": "2026-11-16T10:00:00+09:00"} for n in range(40)]
+    many += [{"id": "k", "title": "[마감] 장학", "start": "2026-11-16T10:00:00+09:00", "key": "notice:1"},
+             {"id": "d", "title": "종일", "start": "2026-11-16T00:00:00+09:00", "allDay": True}]
+    crowded = router.candidates(sessions, notices, {10}, cards, many, {"scholarship": "800"}, NOW)
+    assert sum(1 for topic in crowded if topic.kind == "event") == router.KIND_LIMITS["event"]
+    assert {"thread:100", "card:800:556", "card:900:901"} <= {topic.key for topic in crowded}
+    assert not {"event:k", "event:d"} & {topic.key for topic in crowded}
     assert by_key["card:800:556"].notice == "8" and by_key["card:800:556"].kind == "notice"
     assert by_key["card:900:901"].kind == "mail" and "교수님" in by_key["card:900:901"].label
     assert by_key["event:ev2"].event["location"] == "팔달관"
