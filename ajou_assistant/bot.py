@@ -65,6 +65,7 @@ from .sync import sync_push
 PINS_FILE = STATE_DIR / "pins.json"
 INBOX_FILE = STATE_DIR / "inbox.json"  # 📥 던진 글 → 보낸 주제와 고를 수 있던 후보(버튼용)
 INBOX_KEEP = 200
+THROWN_MARK = "📥"  # 스레드에 남기는 던진 글 사본의 첫 글자
 QUIZ_FILE = STATE_DIR / "english_quizzes.json"
 CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
 GUARD_FILE = Path(guard.__file__).resolve()
@@ -934,8 +935,11 @@ class Assistant(discord.Client):
         if last is not None and moment - last[0] <= JOIN_SECONDS:  # 글과 파일을 나눠 던질 때
             thread = await self.thread_by_id(last[1])
             if thread is not None:
-                await self.forward_thrown(message, thread)
-                await message.reply(f"→ {thread.mention} (이어서)", **quiet(silent=True))
+                quote = await self.forward_thrown(message, thread)
+                reply = await message.reply(f"→ {thread.mention} (이어서)", **quiet(silent=True))
+                self.save_inbox(message.id, {"options": [], "title": "", "at": store.now().isoformat(timespec="seconds"),
+                                             "sent": "join", "thread": thread.id, "quote": quote.id, "reply": reply.id,
+                                             "files": names})
                 await self.converse(thread, message)
                 return
         now = store.now()
@@ -949,12 +953,14 @@ class Assistant(discord.Client):
             print(traceback.format_exc(), flush=True)
         options = ([decision.target] if decision and decision.target else []) + (decision.alternatives if decision else [])
         title = decision.title if decision else thread_name(text or (names[0] if names else "새 주제"))
-        entry = {"options": [topic.to_dict() for topic in options], "title": title, "at": now.isoformat(timespec="seconds")}
+        entry = {"options": [topic.to_dict() for topic in options], "title": title, "at": now.isoformat(timespec="seconds"),
+                 "files": names}
         if decision is not None and decision.confident:
-            thread = await self.deliver_thrown(message, decision.target, title)
-            entry.update(sent=decision.target.key if decision.target else "new", thread=thread.id)
+            delivery = await self.deliver_thrown(message, decision.target, title)
+            entry.update(delivery, sent=decision.target.key if decision.target else "new")
             skip = decision.target.key if decision.target else ""
-            reply = await message.reply(f"→ {thread.mention}로 보냈어요. 다른 곳이면 아래에서 고르세요.",
+            thread = delivery["thread_obj"]
+            reply = await message.reply(f"→ {thread.mention}로 보냈어요. 다른 곳이면 아래에서 고르세요. 이 글을 지우면 보낸 것도 지웁니다.",
                                         view=route_view(message.id, options, skip), **quiet(silent=True))
             entry["reply"] = reply.id
             self.save_inbox(message.id, entry)
@@ -967,7 +973,7 @@ class Assistant(discord.Client):
 
     def save_inbox(self, message_id: int, entry: dict) -> None:
         state = load_json(INBOX_FILE)
-        state[str(message_id)] = entry
+        state[str(message_id)] = {key: value for key, value in entry.items() if key != "thread_obj"}
         save_json(INBOX_FILE, dict(list(state.items())[-INBOX_KEEP:]))
 
     async def route_button(self, interaction: discord.Interaction, article: str) -> None:
@@ -984,9 +990,12 @@ class Assistant(discord.Client):
             return
         options = [router.Topic.from_dict(item) for item in entry.get("options", [])]
         topic = None if choice == "new" or not choice.isdigit() or int(choice) >= len(options) else options[int(choice)]
-        thread = await self.deliver_thrown(original, topic, entry.get("title") or "새 주제")
         moved = bool(entry.get("thread"))
-        entry.update(sent=topic.key if topic else "new", thread=thread.id)
+        if moved:  # 앞서 보낸 곳에서는 거둔다(사본과 답, 이 글 때문에 연 스레드)
+            await self.withdraw(entry)
+        delivery = await self.deliver_thrown(original, topic, entry.get("title") or "새 주제")
+        thread = delivery["thread_obj"]
+        entry.update(delivery, sent=topic.key if topic else "new")
         self.save_inbox(int(message_id), entry)
         if interaction.message is not None:
             try:
@@ -996,9 +1005,12 @@ class Assistant(discord.Client):
         await interaction.followup.send(thread.mention, ephemeral=True)
         await self.converse(thread, original)
 
-    async def deliver_thrown(self, message: discord.Message, topic, title: str) -> discord.Thread:
-        """던진 글을 주제의 스레드로 옮긴다. 스레드가 없으면 연다(카드는 그 카드에, 일정·새 주제는 대화 채널에)."""
-        thread = None
+    async def deliver_thrown(self, message: discord.Message, topic, title: str) -> dict:
+        """던진 글을 주제의 스레드로 옮긴다. 스레드가 없으면 연다(카드는 그 카드에, 일정·새 주제는 대화 채널에).
+
+        {thread, thread_obj, quote, created, starter}를 돌려준다. created면 이 글 때문에 연 스레드이고, 글을 지우면 같이 지운다.
+        """
+        thread, created, starter_ref = None, False, None
         if topic is not None and topic.thread:
             thread = await self.thread_by_id(int(topic.thread))
         elif topic is not None and topic.channel and topic.message:
@@ -1009,7 +1021,9 @@ class Assistant(discord.Client):
                 starter = None
             if starter is not None:
                 row = notice_row(topic.notice) if topic.notice else None
-                thread = await self.existing_thread(starter) or await self.open_thread(starter, topic.title, row)
+                thread = await self.existing_thread(starter)
+                if thread is None:
+                    thread, created = await self.open_thread(starter, topic.title, row), True
                 state = self.sessions.setdefault(str(thread.id), {"title": thread.name})
                 if row is None and starter.embeds and not state.get("session") and not state.get("intro"):
                     state["intro"] = card_intro(starter.embeds[0])
@@ -1028,20 +1042,120 @@ class Assistant(discord.Client):
             else:
                 starter = await chat.send(f"📥 {title}", **quiet(silent=True))
                 thread = await self.open_thread(starter, title, None)
+            created, starter_ref = True, [chat.id, starter.id]
             save_sessions(self.sessions)
         await self.reopen(thread)
-        await self.forward_thrown(message, thread)
-        return thread
+        quote = await self.forward_thrown(message, thread)
+        return {"thread": thread.id, "thread_obj": thread, "quote": quote.id, "created": created, "starter": starter_ref}
 
-    async def forward_thrown(self, message: discord.Message, thread: discord.Thread) -> None:
+    async def forward_thrown(self, message: discord.Message, thread: discord.Thread) -> discord.Message:
         """스레드에 던진 글의 사본을 남긴다(원문 링크와 함께). 대화는 그다음 converse가 한다."""
         body = message_text(message).strip()
         quote = "\n".join("> " + line for line in body[:600].splitlines()) if body else ""
         files = ", ".join(attachment.filename for attachment in message.attachments[:5])
-        text = f"📥 [던진 글]({message.jump_url})" + (f"\n{quote}" + ("…" if len(body) > 600 else "") if quote else "")
+        text = f"{THROWN_MARK} [던진 글]({message.jump_url})" + (f"\n{quote}" + ("…" if len(body) > 600 else "") if quote else "")
         text += f"\n> 첨부: {files}" if files else ""
-        await thread.send(text[:1990], **quiet(silent=True))
+        sent = await thread.send(text[:1990], **quiet(silent=True))
         self.last_throw = (message.created_at.timestamp(), thread.id)
+        return sent
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        if self.inbox_channel and payload.channel_id == self.inbox_channel:
+            await self.undo_throw(payload.message_id)
+
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        if self.inbox_channel and payload.channel_id == self.inbox_channel:
+            for message_id in payload.message_ids:
+                await self.undo_throw(message_id)
+
+    async def undo_throw(self, message_id: int) -> None:
+        """📥에서 던진 글을 지우면 그 글로 만든 것을 지운다(11/16 사용자 요청): 📥의 안내, 스레드의 사본과 그 답,
+        이 글 때문에 연 스레드. 이미 있던 스레드에는 지웠다는 한 줄을 다음 턴 자료로 남긴다."""
+        state = load_json(INBOX_FILE)
+        entry = state.pop(str(message_id), None)
+        if entry is None:
+            return
+        save_json(INBOX_FILE, state)
+        inbox = self.get_channel(self.inbox_channel)
+        if entry.get("reply") and inbox is not None:
+            try:
+                await inbox.get_partial_message(int(entry["reply"])).delete()
+            except discord.HTTPException:
+                pass
+        await self.withdraw(entry)
+
+    async def withdraw(self, entry: dict) -> None:
+        """보낸 곳에서 거둔다. 도는 턴이 있으면 멈추고 끝나기를 기다린 뒤에 지운다."""
+        thread_id = entry.get("thread")
+        if not thread_id:
+            return
+        key = str(thread_id)
+        turn = self.turns.get(int(thread_id))
+        if turn is not None:
+            turn.stop()
+        thread = await self.thread_by_id(int(thread_id))
+        async with self.lock_for(int(thread_id)):
+            if entry.get("created"):
+                await self.remove_thread(thread, key, entry.get("starter"))
+                return
+            if thread is not None and entry.get("quote"):
+                await self.remove_quote(thread, int(entry["quote"]))
+            folder = THREAD_DIR / key
+            for name in entry.get("files", []):
+                (folder / "uploads" / Path(name).name).unlink(missing_ok=True)
+            note = "사용자가 📥에서 던진 글을 지웠다. 그 글과 그에 대한 답은 없던 것으로 한다."
+            record.log_turn(folder, "시스템", note)
+            state = self.sessions.get(key)
+            if state is not None:
+                state.setdefault("notes", []).append({"id": None, "text": note})
+                save_sessions(self.sessions)
+        await asyncio.to_thread(sync_push, "auto: 던진 글 지움", str(THREAD_DIR))
+
+    async def remove_quote(self, thread: discord.Thread, quote_id: int) -> None:
+        """사본과, 그 바로 뒤에 봇이 올린 답(상태 줄·답·파일)을 지운다. 사용자의 다음 글이나 다음 사본에서 멈춘다."""
+        try:
+            quote = await thread.fetch_message(quote_id)
+        except discord.HTTPException:
+            return
+        doomed = [quote]
+        async for item in thread.history(after=quote, oldest_first=True, limit=50):
+            if item.author.id != self.user.id or item.content.startswith(THROWN_MARK):
+                break
+            doomed.append(item)
+        await self.drop_close_button(thread.id)
+        for item in doomed:
+            try:
+                await item.delete()
+            except discord.HTTPException:
+                pass
+
+    async def remove_thread(self, thread: discord.Thread | None, key: str, starter) -> None:
+        """이 글 때문에 연 스레드를 지운다. 스레드를 지울 권한이 없으면 봇 글을 지우고 보관한다."""
+        if thread is not None:
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                async for item in thread.history(limit=100):
+                    if item.author.id == self.user.id:
+                        try:
+                            await item.delete()
+                        except discord.HTTPException:
+                            pass
+                try:
+                    await thread.edit(archived=True)
+                except discord.HTTPException:
+                    pass
+        if starter:
+            channel = self.get_channel(int(starter[0]))
+            if channel is not None:
+                try:
+                    await channel.get_partial_message(int(starter[1])).delete()
+                except discord.HTTPException:
+                    pass
+        self.sessions.pop(key, None)
+        save_sessions(self.sessions)
+        self.last_status.pop(int(key), None)
+        shutil.rmtree(THREAD_DIR / key, ignore_errors=True)
 
     # ── 자료 남기기 (materials.py) ───────────────────────────────
 

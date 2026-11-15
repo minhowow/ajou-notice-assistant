@@ -132,8 +132,9 @@ def candidates(sessions: dict, notices: list[dict], closed: set, mail_cards: dic
         if start is None or not row.get("id") or row.get("status") == "declined" or str(row["id"]) in threaded_events:
             continue
         title = str(row.get("title") or "일정")
-        # 비서가 공지에서 넣은 일정(마감 표시 등)은 그 공지 카드가 주제다. 종일 일정도 할 일 표시라 뺀다.
-        if row.get("key") or row.get("allDay") or title.startswith(MARKER_PREFIXES):
+        # 마감·접수 시작 표시와 종일 일정은 할 일 표시라 뺀다. 비서가 공지에서 넣은 일정이라도 행사 자체(예: 부스 운영)는
+        # 남긴다. 11/16: 비서가 넣은 일정을 통째로 빼서 부스 일정이 빠지고 시상식으로 잘못 갔다.
+        if row.get("allDay") or title.startswith(MARKER_PREFIXES):
             continue
         found.append((start, Topic(f"event:{row['id']}", "event", title, f"일정 · {title} · {start:%m/%d %H:%M}",
                                    event={name: row.get(name, "") for name in ("id", "title", "start", "end", "location")})))
@@ -154,7 +155,7 @@ def route(client: anthropic.Anthropic, text: str, topics: list[Topic], now: date
     response = client.messages.create(
         model=ROUTER_MODEL, max_tokens=2000, system=RULES,
         messages=[{"role": "user", "content": content}],
-        output_config={"format": {"type": "json_schema", "schema": SCHEMA}, "effort": "low"},
+        output_config={"format": {"type": "json_schema", "schema": SCHEMA}, "effort": "medium"},
     )
     raw = next((block.text for block in response.content if block.type == "text"), "{}")
     data = json.loads(raw)
