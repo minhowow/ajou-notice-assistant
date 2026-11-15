@@ -392,6 +392,13 @@ def preflight() -> None:
     load_secrets()["ANTHROPIC_API_KEY"]
 
 
+def cmd_mail(args) -> int:
+    """학교 메일을 확인해 알아야 할 것만 알린다(mail.py). 시계가 08~23시 15분마다 부른다."""
+    from . import mail
+    client, discord = make_clients(args.dry_run)
+    return mail.main(discord, client, args.dry_run)
+
+
 def make_clients(dry_run: bool) -> tuple[anthropic.Anthropic, Discord]:
     secrets = load_secrets()
     client = anthropic.Anthropic(api_key=secrets["ANTHROPIC_API_KEY"], timeout=180, max_retries=3)
@@ -1114,7 +1121,8 @@ def cmd_weekly(args) -> int:
 # 켜질 때 한 번만 돈다(systemd의 Persistent=true와 같다). 각 명령은 따로 프로세스로 띄워, 한 번의
 # 실패나 메모리 문제가 시계를 멈추지 않게 한다. 명령끼리는 run.lock으로 겹치지 않는다.
 SCHEDULE_FILE = STATE_DIR / "schedule.json"
-SCHEDULE_JOBS = ("run", "digest", "weekly", "backup")
+SCHEDULE_JOBS = ("run", "digest", "weekly", "backup", "mail")
+MAIL_HOURS = (8, 23)  # 메일 확인: 08:00~23:00, 15분마다
 
 
 def last_slot(job: str, moment: datetime) -> datetime:
@@ -1122,6 +1130,14 @@ def last_slot(job: str, moment: datetime) -> datetime:
     if job == "run":
         slot = moment.replace(minute=7, second=0, microsecond=0)
         return slot if moment >= slot else slot - timedelta(hours=1)
+    if job == "mail":
+        first, last = MAIL_HOURS
+        slot = moment.replace(minute=moment.minute - moment.minute % 15, second=0, microsecond=0)
+        if slot.hour >= last:
+            slot = slot.replace(hour=last, minute=0)
+        elif slot.hour < first:
+            slot = (slot - timedelta(days=1)).replace(hour=last, minute=0)
+        return slot
     if job in ("digest", "backup"):
         hour, minute = (21, 30) if job == "digest" else (4, 30)
         slot = moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -1264,14 +1280,17 @@ def main() -> int:
     check.add_argument("--title", default="")
     check.add_argument("--effort", default="low")
     check.set_defaults(func=cmd_check)
+    mailer = commands.add_parser("mail", help="학교 메일 확인 (Gmail 커넥터, 구독 로그인 필요)")
+    mailer.add_argument("--dry-run", action="store_true")
+    mailer.set_defaults(func=cmd_mail)
     backup = commands.add_parser("backup", help="상태 폴더와 Claude 세션을 S3에 백업 (AWS 설정이 있을 때)")
     backup.add_argument("--restore", default="", help="이 빈 폴더에 가장 최근 백업을 푼다")
     backup.add_argument("--key", default="", help="풀 백업 객체 (기본은 가장 최근)")
     backup.set_defaults(func=cloud.backup_main)
     args = parser.parse_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 백업은 공지 실행과 상관없이 돈다.
-    if args.func in (cmd_schedule, cloud.backup_main):
+    # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 백업과 메일은 공지 실행과 상관없이 돈다.
+    if args.func in (cmd_schedule, cloud.backup_main, cmd_mail):
         return args.func(args)
     with (STATE_DIR / "run.lock").open("w") as lock:
         try:

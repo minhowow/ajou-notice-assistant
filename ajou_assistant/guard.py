@@ -10,7 +10,9 @@
   고치기(손님이 고칠 수 있는 남의 일정이면 주최자가 읽는다), 다른 캘린더, 공개 설정, 첨부, 회의 주소가 그렇다.
   도구마다 받을 수 있는 칸을 정해 두고 그 밖의 칸이 오면 막는다. 고치기는 시간·알림·색만 된다.
 - 노션: 읽기만 된다. 팀 노션은 함께 쓰는 공간이라 잘못 고치면 남의 문서가 바뀐다.
-- 그 밖의 커넥터(Gmail 등): 막는다.
+- Gmail: 읽기 도구(search_threads, get_thread)만 지나간다. 메일 확인(mail.py)만 이 둘을 허용 목록에 넣는다.
+  보내기·초안·라벨·삭제·전달은 막는다(11/6 사용자: 메일 발송은 자동 승인하지 않고 코드로 막는다).
+- 그 밖의 커넥터: 막는다.
 - 파일 쓰기: 쓰기는 스레드 폴더 안으로 제한되어 있지만, 그 안에서도 `.git`으로 시작하는 파일(`.gitattributes`로
   그 폴더의 git-crypt 암호화를 끌 수 있다), `.claude` 폴더, `CLAUDE.md`(다음 대화에 지시로 읽힌다), `.mcp.json`은
   쓰지 못하게 한다. 공지 속 숨은 지시가 남긴 파일이 나중에 규칙처럼 작동하는 것을 막는다(11/6 점검).
@@ -28,6 +30,8 @@ import sys
 
 CALENDAR = "mcp__claude_ai_Google_Calendar__"
 NOTION = "mcp__claude_ai_Notion__"
+GMAIL = "mcp__claude_ai_Gmail__"
+GMAIL_READ = {"search_threads", "get_thread"}
 CALENDAR_READ = {"list_calendars", "list_events", "search_events", "get_event", "suggest_time"}
 # 쓰는 도구는 받을 수 있는 칸을 정해 둔다. 그 밖의 칸(참석자, 첨부, 공개 설정, 회의 주소, 응답 코멘트 등)은 막는다.
 CALENDAR_WRITE_KEYS = {
@@ -132,6 +136,10 @@ def verdict(tool: str, arguments: dict, owners: set[str]) -> str | None:
         if name not in NOTION_READ:
             return "노션은 읽기만 합니다. 고칠 내용은 사용자에게 초안으로 보여 주세요."
         return None
+    if tool.startswith(GMAIL):
+        if tool[len(GMAIL):] in GMAIL_READ:
+            return None
+        return "메일은 읽기만 합니다. 보내기·초안·라벨·삭제·전달은 하지 않습니다. 필요하면 사용자에게 초안을 보여 주세요."
     if tool.startswith("mcp__"):
         return "이 스레드에서 허용하지 않은 커넥터입니다."
     return None

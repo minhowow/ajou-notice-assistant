@@ -16,7 +16,9 @@ API = "https://discord.com/api/v10"
 ICON = Path(__file__).resolve().parent / "assets" / "icon.png"  # 패키지 안에 두어 도커 이미지·설치본에도 들어간다
 CATEGORY = setting("AJOU_DISCORD_CATEGORY", "아주대 비서")  # 서버에 이 이름의 카테고리를 먼저 만들어 둔다.
 CHANNELS = [  # (키, 이름, 설명)
+    ("inbox", "📥던지기", "글·사진·파일·메모를 아무거나 던지면 맞는 주제의 스레드로 보내 이어 갑니다"),
     ("urgent", "🚨긴급", "7일 안에 마감되는 중요 공지. 강한 알림"),
+    ("mail", "📧메일", "학교 메일 중 알아야 할 것. 08~23시 15분마다 확인"),
     ("scholarship", "🎓장학", "장학 공지"),
     ("international", "🌏국제교류", "교환학생·해외 프로그램"),
     ("career", "💼취업-비교과", "채용·인턴·비교과 프로그램"),
