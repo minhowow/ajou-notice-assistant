@@ -9,14 +9,15 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import date, datetime, timedelta
 from enum import Enum
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
-from .scrape import Detail, ListItem
+from .scrape import Detail, ListItem, site_domain
 from .triage import Analysis
 
 API = "https://discord.com/api/v10"
@@ -108,6 +109,51 @@ class Discord:
             raise DiscordError(0, str(error)[:200]) from error
         if response.status_code >= 400 and not (not on and response.status_code == 404):
             raise DiscordError(response.status_code, response.text[:200])
+
+    def request(self, method: str, path: str, payload: dict | None = None) -> dict:
+        """메시지 읽기·고치기·스레드 열기에 쓰는 REST 호출. 429는 기다렸다 다시 한다."""
+        for _ in range(5):
+            try:
+                response = self.client.request(method, path, json=payload)
+            except httpx.HTTPError as error:
+                raise DiscordError(0, str(error)[:200]) from error
+            if response.status_code == 429:
+                time.sleep(float(response.json().get("retry_after", 2)) + 0.2)
+                continue
+            if response.status_code >= 400:
+                raise DiscordError(response.status_code, response.text[:200])
+            return response.json() if response.content else {}
+        raise DiscordError(429, "재시도 초과")
+
+    def target(self, channel: str) -> str:
+        target = self.channels.get(channel) or (channel if str(channel).isdigit() else None)
+        if target is None:
+            raise KeyError(f"모르는 채널: {channel}")
+        return str(target)
+
+    def fetch(self, channel: str, message_id: str) -> dict:
+        return self.request("GET", f"/channels/{self.target(channel)}/messages/{message_id}")
+
+    def edit_embeds(self, channel: str, message_id: str, embeds: list[dict]) -> None:
+        """알림 카드의 내용만 고친다. 버튼(components)은 그대로 둔다. 고쳐도 알림은 가지 않는다."""
+        if self.dry_run:
+            print(f"[dry-run #{channel}] 카드 고침 {message_id}", json.dumps(embeds, ensure_ascii=False)[:600])
+            return
+        self.request("PATCH", f"/channels/{self.target(channel)}/messages/{message_id}", {"embeds": embeds})
+
+    def open_thread(self, channel: str, message_id: str, name: str) -> str | None:
+        """알림 메시지에 스레드를 열고 소유자를 넣는다. 스레드 번호는 알림 메시지 번호와 같다."""
+        if self.dry_run:
+            print(f"[dry-run #{channel}] 스레드 열기 {message_id} {name}")
+            return None
+        thread = self.request("POST", f"/channels/{self.target(channel)}/messages/{message_id}/threads",
+                              {"name": name[:90], "auto_archive_duration": 10080})
+        if self.owner:
+            try:
+                self.request("PUT", f"/channels/{thread['id']}/thread-members/{self.owner}")
+            except DiscordError as error:
+                print(f"스레드에 소유자 넣기 실패 {thread['id']}: {error}")
+        return thread["id"]
 
     def text(self, channel: str, message: str, tier: Tier = Tier.NOTIFY) -> None:
         for chunk in split_message(message):
@@ -261,20 +307,41 @@ def fit_embed(embed: dict) -> dict:
     return embed
 
 
+MD_LINK = re.compile(r"\[([^\]\n]*)\]\(\s*<?(https?://[^\s)>]+)>?\s*\)")
+BARE_LINK = re.compile(r"<?(https?://[^\s<>()\[\]`]+)>?")
+
+
+def plain_links(text: str, trusted: str) -> str:
+    """AI가 쓴 글 속 링크 중 학교 도메인이 아닌 것은 누를 수 없는 글자로 바꾼다 (11/15 보안 점검).
+
+    공지 속 숨은 지시가 판단 AI에게 '[신청하기](가짜 주소)'를 쓰게 하면 믿을 만한 비서 카드에 눌리는 링크가 된다.
+    원문·첨부·캘린더 링크는 코드가 만들므로 그대로 둔다. 이 함수는 AI가 쓴 칸에만 쓴다.
+    """
+    def ok(url: str) -> bool:
+        host = (urlparse(url).hostname or "").lower()
+        return bool(trusted) and (host == trusted or host.endswith("." + trusted))
+    text = MD_LINK.sub(lambda m: m.group(0) if ok(m.group(2)) else f"{m.group(1)} (`{urlparse(m.group(2)).hostname or '주소'}`)", text)
+    return BARE_LINK.sub(lambda m: m.group(0) if ok(m.group(1)) else f"`{m.group(1)}`", text)
+
+
 def build_embed(item: ListItem, detail: Detail, analysis: Analysis, notes: list[str], failures: list[str], today: date, changed: bool) -> dict:
+    trusted = site_domain(item.url)
+
+    def said(text: str) -> str:  # AI가 쓴 칸
+        return plain_links(text, trusted)
     fields = [
-        {"name": "왜 나에게", "value": _clip(analysis.why_relevant or "-", 1024)},
-        {"name": "자격", "value": _clip(f"{ELIGIBILITY[analysis.eligibility]}: {analysis.eligibility_reason}", 1024)},
-        {"name": "다음 행동", "value": _clip(analysis.action or "-", 1024)},
+        {"name": "왜 나에게", "value": _clip(said(analysis.why_relevant or "-"), 1024)},
+        {"name": "자격", "value": _clip(said(f"{ELIGIBILITY[analysis.eligibility]}: {analysis.eligibility_reason}"), 1024)},
+        {"name": "다음 행동", "value": _clip(said(analysis.action or "-"), 1024)},
     ]
     deadlines = format_deadlines(analysis, today)
     if deadlines:
-        fields.append({"name": "일정", "value": _clip(deadlines, 1024)})
+        fields.append({"name": "일정", "value": _clip(said(deadlines), 1024)})
     asks = format_asks(analysis, today)
     if asks:
-        fields.append({"name": "🤝 남에게 부탁할 서류", "value": _clip(asks, 1024)})
+        fields.append({"name": "🤝 남에게 부탁할 서류", "value": _clip(said(asks), 1024)})
     if analysis.unknowns:
-        fields.append({"name": "확인 필요", "value": _clip("\n".join(analysis.unknowns), 1024)})
+        fields.append({"name": "확인 필요", "value": _clip(said("\n".join(analysis.unknowns)), 1024)})
     if detail.attachments:
         links = "\n".join(f"[{_clip(a.name.replace(']', ' '), 60)}]({a.url})" for a in detail.attachments[:8])
         fields.append({"name": "첨부", "value": _clip(links, 1024)})
@@ -285,7 +352,7 @@ def build_embed(item: ListItem, detail: Detail, analysis: Analysis, notes: list[
     return fit_embed({
         "title": _clip(prefix + item.title, 256),
         "url": item.url,
-        "description": _clip(analysis.summary, 4000),
+        "description": _clip(said(analysis.summary), 4000),
         "color": COLORS[analysis.relevance],
         "fields": fields,
         "footer": {"text": _clip(f"관련도 {RELEVANCE[analysis.relevance]} · {item.department or item.board_key} · {item.date}", 200)},

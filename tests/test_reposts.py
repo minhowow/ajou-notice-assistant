@@ -104,6 +104,22 @@ class FakeDiscord:
     def pin(self, channel, message_id, on=True):
         self.sent.append((channel, {"pin": message_id, "on": on}, None))
 
+    # 재공지는 처음 카드를 고치고, 알림 메시지에 스레드를 연다 (v0.6.0).
+    thread_of = None
+    edits = None
+    opened = None
+
+    def fetch(self, channel, message_id):
+        return {"embeds": [{"title": "OO장학금", "fields": [{"name": "마감", "value": "11/10"}]}],
+                **({"thread": {"id": self.thread_of}} if self.thread_of else {})}
+
+    def edit_embeds(self, channel, message_id, embeds):
+        self.edits = (self.edits or []) + [(channel, message_id, embeds)]
+
+    def open_thread(self, channel, message_id, name):
+        self.opened = (self.opened or []) + [(channel, message_id, name)]
+        return message_id
+
 
 def test_reminders_go_once_per_group_and_stop_when_any_member_is_closed(notices, monkeypatch):
     from ajou_assistant import cli
@@ -119,7 +135,8 @@ def test_reminders_go_once_per_group_and_stop_when_any_member_is_closed(notices,
     assert cli.send_reminders(fake, date(2026, 11, 12)) == 0
 
 
-def test_repost_goes_to_thread_then_reply_then_silence(notices, tmp_path, monkeypatch):
+def test_repost_edits_the_first_card_and_talks_in_its_thread(notices, tmp_path, monkeypatch):
+    """재공지는 채널 맨 아래에 새 메시지를 쌓지 않는다. 처음 카드에 표시를 붙이고, 중요한 차이만 그 카드의 스레드로."""
     from ajou_assistant import cli
     from ajou_assistant.scrape import ListItem
     sessions = tmp_path / "threads.json"
@@ -128,20 +145,37 @@ def test_repost_goes_to_thread_then_reply_then_silence(notices, tmp_path, monkey
     item = ListItem(9, "scholarship", "", "[재공지] OO장학금", "", "", "2026-11-05", link="https://www.ajou.ac.kr/9")
     changed = {"parent": 1, "root": 1, "changes": "마감 11/20으로 연장"}
 
-    sessions.write_text(json.dumps({"1234": {"notice": 1, "title": "OO"}}))
+    sessions.write_text(json.dumps({"1234": {"notice": 1, "title": "OO"}}))  # 열린 스레드가 있으면 거기로
     fake = FakeDiscord()
     assert cli.deliver_repost(fake, item, changed) == (None, None)
     [(channel, payload, tier)] = fake.sent
     assert channel == "1234" and tier == Tier.NOTIFY and repost.note_id(payload["content"]) == "9"
+    [(_, message_id, embeds)] = fake.edits
+    badge = embeds[0]["fields"][0]
+    assert message_id == "555" and badge["name"] == "🔁 재공지" and badge["value"] == "2번째 공지 · 2026-11-05 · 마감 11/20으로 연장"
+    assert embeds[0]["fields"][1]["name"] == "마감"  # 원래 칸은 그대로
 
-    sessions.write_text("{}")
+    sessions.write_text("{}")  # 스레드가 없으면 처음 알림에 연다. 채널에 답장을 쌓지 않는다.
     fake = FakeDiscord()
-    assert cli.deliver_repost(fake, item, changed) == ("scholarship", "m1")
-    assert fake.sent[0][1]["message_reference"]["message_id"] == "555"
+    assert cli.deliver_repost(fake, item, changed) == ("scholarship", None)
+    assert fake.opened == [("scholarship", "555", "OO장학금")]
+    assert [channel for channel, _, _ in fake.sent] == ["555"] and "message_reference" not in fake.sent[0][1]
 
     fake = FakeDiscord()
+    fake.thread_of = "555"  # 이미 달린 스레드는 다시 열지 않는다
+    assert cli.deliver_repost(fake, item, changed) == ("scholarship", None)
+    assert fake.opened is None and [channel for channel, _, _ in fake.sent] == ["555"]
+
+    sessions.write_text(json.dumps({"555": {"notice": 1, "done": "2026-11-04T10:00"}}))  # 닫은 스레드에는 쓰지 않는다
+    fake = FakeDiscord()
+    fake.thread_of = "555"
+    assert cli.deliver_repost(fake, item, changed) == ("scholarship", None) and not fake.sent
+
+    fake = FakeDiscord()  # 차이가 없으면 표시만 고친다
     assert cli.deliver_repost(fake, item, {**changed, "changes": ""}) == (None, None) and not fake.sent
+    assert fake.edits[0][2][0]["fields"][0]["value"].endswith("내용 같음")
     store.mark_item(1, "skip")
+    fake = FakeDiscord()
     assert cli.deliver_repost(fake, item, changed) == (None, None) and not fake.sent
 
 

@@ -265,24 +265,61 @@ def first_alert(members: set) -> dict | None:
     return min(rows, key=lambda row: str(row.get("analyzed_at", ""))) if rows else None
 
 
-def deliver_repost(discord: Discord, item: ListItem, link: dict) -> tuple[str | None, str | None] | None:
-    """재공지를 알린다. 스레드가 있으면 스레드에, 없고 중요한 차이가 있으면 처음 알림의 답장으로 한 줄.
+def done_threads() -> set[str]:
+    """완료로 닫은 스레드. 봇이 쓰면 다시 열리므로 재공지도 쓰지 않는다."""
+    try:
+        sessions = json.loads(SESSIONS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {key for key, state in sessions.items() if state.get("done")}
 
+
+def badge_first(discord: Discord, first: dict, item: ListItem, link: dict, count: int) -> None:
+    """처음 알림 카드에 '🔁 N번째 공지'를 붙인다. 실패해도 알림 흐름은 그대로 간다."""
+    if discord.dry_run:
+        print(f"[dry-run] 카드 표시 {first['message_id']}: {count}번째 공지 {link['changes']}")
+        return
+    try:
+        message = discord.fetch(first["channel"], first["message_id"])
+        embeds = message.get("embeds") or []
+        if embeds:
+            embeds[0] = repost.badge(embeds[0], count, item.date, link["changes"])
+            discord.edit_embeds(first["channel"], first["message_id"], embeds)
+    except (DiscordError, KeyError) as error:
+        if isinstance(error, DiscordError) and error.is_outage:
+            raise
+        print(f"재공지 표시 실패 {first['message_id']}: {error}")
+
+
+def deliver_repost(discord: Discord, item: ListItem, link: dict) -> tuple[str | None, str | None] | None:
+    """재공지를 알린다. 채널 맨 아래에 새 메시지를 쌓지 않는다 (v0.6.0, 11/15 사용자 요청).
+
+    - 처음 알림 카드에 '🔁 N번째 공지 · 바뀐 점'을 붙여 고친다(알림 없음).
+    - 열린 스레드가 있으면 거기에 한 줄. 없고 중요한 차이가 있으면 처음 알림에 스레드를 열어 거기에 알린다.
     (채널, 메시지 ID)를 돌려준다. 처음 공지가 알림 없이 끝났으면 None을 돌려 평소대로 알리게 한다.
     """
     members = repost.group_ids(link["root"])
     text = repost.note(item.title, item.url, item.article_id, link["changes"])
     tier = Tier.NOTIFY if link["changes"] else Tier.QUIET
+    first = first_alert(members)
+    if first is not None:
+        badge_first(discord, first, item, link, len(members) + 1)
     if tell_threads(discord, link["root"], text, tier):
         return None, None
-    first = first_alert(members)
     if first is None:
         return None
     if not link["changes"] or members & store.closed_items():
         return None, None
-    payload = {"content": text, "flags": SUPPRESS_EMBEDS,
-               "message_reference": {"message_id": first["message_id"], "fail_if_not_exists": False}}
-    return first["channel"], discord.send(first["channel"], payload, tier=tier)
+    thread = None
+    if not discord.dry_run:
+        message = discord.fetch(first["channel"], first["message_id"])
+        thread = (message.get("thread") or {}).get("id")
+        if thread in done_threads():
+            return first["channel"], None
+    thread = thread or discord.open_thread(first["channel"], first["message_id"], first.get("title") or item.title)
+    if thread:
+        discord.send(thread, {"content": text, "flags": SUPPRESS_EMBEDS}, tier=tier)
+    return first["channel"], None
 
 
 def handle(item, fetcher, client, discord, today, changed=False, backfill=False, allow_partial=False, hashes: dict | None = None) -> dict:

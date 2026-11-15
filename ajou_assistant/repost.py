@@ -188,6 +188,17 @@ def note(title: str, url: str, article_id, changes: str) -> str:
     return f"🔁 **같은 공지가 다시 올라왔습니다** [{title}](<{url}>)\n{body}\n{NOTE_TAG}{article_id}"
 
 
+BADGE_NAME = "🔁 재공지"
+
+
+def badge(embed: dict, count: int, date: str, changes: str) -> dict:
+    """처음 알림 카드에 붙이는 재공지 표시. 같은 이름의 칸이 있으면 바꾼다(알림을 새로 쌓지 않는다)."""
+    value = f"{count}번째 공지" + (f" · {date}" if date else "") + (f" · {changes}" if changes else " · 내용 같음")
+    fields = [field for field in embed.get("fields", []) if field.get("name") != BADGE_NAME]
+    fields.insert(0, {"name": BADGE_NAME, "value": value[:1024], "inline": False})
+    return {**embed, "fields": fields[:25]}
+
+
 def note_id(text: str) -> str | None:
     match = re.search(r"^" + re.escape(NOTE_TAG) + r"(\S+)\s*$", text or "", re.M)
     return match.group(1) if match else None

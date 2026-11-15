@@ -4,13 +4,18 @@
 되돌리기 어려운 일은 못 하게 여기서 막는다. 막으면 종료 코드 2와 이유를 돌려주고, Claude는 그 이유를
 보고 사용자에게 설명한다.
 
-- 캘린더: 보기, 만들기, 고치기, 참석 응답은 된다. 삭제는 막는다. 나 말고 다른 사람을 참석자로 넣는 것도
+- 캘린더: 보기, 만들기, 시간 고치기, 참석 응답은 된다. 삭제는 막는다. 나 말고 다른 사람을 참석자로 넣는 것도
   막는다. 초대 메일이 나가면 일정 내용이 밖으로 나가기 때문이다.
+  11/15 보안 점검: 글을 남에게 보낼 수 있는 칸을 막는다. 참석 응답의 코멘트(주최자에게 간다), 남의 일정 제목·설명
+  고치기(손님이 고칠 수 있는 남의 일정이면 주최자가 읽는다), 다른 캘린더, 공개 설정, 첨부, 회의 주소가 그렇다.
+  도구마다 받을 수 있는 칸을 정해 두고 그 밖의 칸이 오면 막는다. 고치기는 시간·알림·색만 된다.
 - 노션: 읽기만 된다. 팀 노션은 함께 쓰는 공간이라 잘못 고치면 남의 문서가 바뀐다.
 - 그 밖의 커넥터(Gmail 등): 막는다.
 - 파일 쓰기: 쓰기는 스레드 폴더 안으로 제한되어 있지만, 그 안에서도 `.git`으로 시작하는 파일(`.gitattributes`로
   그 폴더의 git-crypt 암호화를 끌 수 있다), `.claude` 폴더, `CLAUDE.md`(다음 대화에 지시로 읽힌다), `.mcp.json`은
   쓰지 못하게 한다. 공지 속 숨은 지시가 남긴 파일이 나중에 규칙처럼 작동하는 것을 막는다(11/6 점검).
+  대화 원문 `log.md`와 받아 둔 공지 원문(`notice*/`)도 쓰지 못한다. 기록 단계가 log.md를 사용자 말로 믿고
+  독촉을 끄거나 참석 응답을 바꾸므로, 거기에 가짜 '나' 턴을 덧붙이면 기록이 조작된다(11/15 점검).
 
 표준 라이브러리만 쓴다. `python -I guard.py`로 실행되어 저장소 코드를 불러오지 않는다.
 """
@@ -23,10 +28,19 @@ import sys
 
 CALENDAR = "mcp__claude_ai_Google_Calendar__"
 NOTION = "mcp__claude_ai_Notion__"
-CALENDAR_ALLOWED = {
-    "list_calendars", "list_events", "search_events", "get_event", "suggest_time",
-    "create_event", "update_event", "respond_to_event",
+CALENDAR_READ = {"list_calendars", "list_events", "search_events", "get_event", "suggest_time"}
+# 쓰는 도구는 받을 수 있는 칸을 정해 둔다. 그 밖의 칸(참석자, 첨부, 공개 설정, 회의 주소, 응답 코멘트 등)은 막는다.
+CALENDAR_WRITE_KEYS = {
+    # 참석자 칸은 나만 들어 있을 때 된다(people()가 남의 주소를 먼저 막는다).
+    "create_event": {"summary", "startTime", "endTime", "allDay", "timeZone", "description", "location", "colorId", "attendees",
+                     "overrideReminders", "useDefaultReminders", "availability", "recurrenceData", "calendarId",
+                     "notificationLevel"},
+    "update_event": {"eventId", "startTime", "endTime", "allDay", "timeZone", "colorId", "overrideReminders",
+                     "useDefaultReminders", "availability", "calendarId", "notificationLevel"},
+    "respond_to_event": {"eventId", "responseStatus", "calendarId", "notificationLevel"},
 }
+CALENDAR_ALLOWED = CALENDAR_READ | set(CALENDAR_WRITE_KEYS)
+GUARDED_FILES = {"log.md"}
 NOTION_READ = {
     "notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-teams",
     "notion-get-comments", "notion-list-recent-pages", "notion-list-favorite-pages", "notion-list-shared-pages",
@@ -66,6 +80,32 @@ def rule_path(path: str) -> bool:
         bool(parts) and parts[-1].lower() in RULE_FILES)
 
 
+def record_path(path: str) -> bool:
+    """코드가 쓰는 대화 원문(log.md)과 받아 둔 공지 원문(notice*/)이면 True."""
+    parts = [part for part in str(path).replace("\\", "/").split("/") if part]
+    return bool(parts) and (parts[-1].lower() in GUARDED_FILES or any(part.lower().startswith("notice") for part in parts[:-1]))
+
+
+def calendar_problem(name: str, arguments: dict, owners: set[str]) -> str | None:
+    """캘린더 쓰기 도구의 칸을 본다. 막을 이유를 돌려준다."""
+    allowed = CALENDAR_WRITE_KEYS.get(name)
+    if allowed is None:
+        return None
+    extra = sorted(key for key in arguments if key not in allowed)
+    if extra:
+        if name == "update_event" and {"summary", "description", "location"} & set(extra):
+            return ("일정 제목·설명·장소는 고치지 않습니다(남의 일정이면 주최자가 읽습니다). 시간만 고치거나, "
+                    "새 일정을 만들고 옛 일정은 사용자에게 지우라고 안내하세요.")
+        return "이 칸은 쓰지 않습니다: " + ", ".join(extra) + ". 참석자·첨부·공개 설정·코멘트 없이 다시 하세요."
+    calendar = str(arguments.get("calendarId") or "primary").strip().lower()
+    if calendar != "primary" and calendar not in owners:
+        return "내 기본 캘린더에만 씁니다. calendarId를 빼고 다시 하세요."
+    level = str(arguments.get("notificationLevel") or "NONE").upper()
+    if level not in ("NONE", "NOTIFICATION_LEVEL_UNSPECIFIED") and name != "respond_to_event":
+        return "알림 메일은 보내지 않습니다. notificationLevel을 빼거나 NONE으로 하세요."
+    return None
+
+
 def verdict(tool: str, arguments: dict, owners: set[str]) -> str | None:
     """막을 이유를 돌려준다. 허용이면 None."""
     if tool in FILE_TOOLS:
@@ -73,6 +113,8 @@ def verdict(tool: str, arguments: dict, owners: set[str]) -> str | None:
         if rule_path(path):
             return ("git 설정(.git*), Claude 설정(.claude), CLAUDE.md, .mcp.json은 스레드에서 쓰지 않습니다. "
                     "필요하면 사용자에게 맥 CLI에서 고치라고 안내하세요.")
+        if record_path(path):
+            return "대화 원문(log.md)과 공지 원문(notice*/)은 코드가 씁니다. 다른 파일 이름으로 저장하세요."
         return None
     if tool.startswith(CALENDAR):
         name = tool[len(CALENDAR):]
@@ -84,7 +126,7 @@ def verdict(tool: str, arguments: dict, owners: set[str]) -> str | None:
         if others:
             return ("다른 사람을 참석자로 넣으면 초대 메일이 나가므로 막았습니다: " + ", ".join(others)
                     + ". 참석자 없이 다시 만들고, 초대가 필요하면 사용자에게 직접 하라고 안내하세요.")
-        return None
+        return calendar_problem(name, arguments, owners)
     if tool.startswith(NOTION):
         name = tool[len(NOTION):]
         if name not in NOTION_READ:

@@ -22,7 +22,30 @@ def test_guard_allows_own_events_and_emails_in_description():
     event = {"summary": "장학 마감", "description": "문의 iss@ajou.ac.kr", "attendees": ["me@gmail.com"]}
     assert guard.verdict(CAL + "create_event", event, OWNERS) is None
     assert guard.verdict(CAL + "list_events", {}, OWNERS) is None
-    assert guard.verdict(CAL + "respond_to_event", {"response": "accepted"}, OWNERS) is None
+    assert guard.verdict(CAL + "respond_to_event", {"eventId": "e1", "responseStatus": "accepted"}, OWNERS) is None
+    assert guard.verdict(CAL + "update_event", {"eventId": "e1", "startTime": "2026-11-20T10:00:00"}, OWNERS) is None
+
+
+def test_guard_closes_the_calendar_ways_to_send_text_out():
+    """11/15 점검: 응답 코멘트는 주최자에게, 남의 일정 설명은 그 주최자에게 간다. 공개·다른 캘린더·첨부도 막는다."""
+    leak = "PROFILE_PRIVATE 내용"
+    assert guard.verdict(CAL + "respond_to_event", {"eventId": "e1", "responseStatus": "accepted", "responseComment": leak}, OWNERS)
+    assert "제목·설명" in guard.verdict(CAL + "update_event", {"eventId": "e1", "description": leak}, OWNERS)
+    assert guard.verdict(CAL + "update_event", {"eventId": "e1", "summary": leak}, OWNERS)
+    base = {"summary": "마감", "startTime": "2026-11-20T10:00:00", "endTime": "2026-11-20T10:30:00"}
+    assert guard.verdict(CAL + "create_event", {**base, "visibility": "public"}, OWNERS)
+    assert guard.verdict(CAL + "create_event", {**base, "attachments": [{"fileUrl": "https://x"}]}, OWNERS)
+    assert guard.verdict(CAL + "create_event", {**base, "calendarId": "shared@group.calendar.google.com"}, OWNERS)
+    assert guard.verdict(CAL + "create_event", {**base, "notificationLevel": "ALL"}, OWNERS)
+    assert guard.verdict(CAL + "create_event", {**base, "calendarId": "Me@Ajou.ac.kr"}, OWNERS) is None
+    assert guard.verdict(CAL + "create_event", {**base, "notificationLevel": "NONE"}, OWNERS) is None
+
+
+def test_guard_keeps_the_conversation_log_and_notice_copies_for_the_code():
+    for path in ("outputs/threads/1/log.md", "outputs/threads/1/notice/notice.md", "outputs/threads/1/notice-9/analysis.json"):
+        assert guard.verdict("Write", {"file_path": path}, OWNERS), path
+    assert guard.verdict("Edit", {"file_path": "outputs/threads/1/LOG.md"}, OWNERS)
+    assert guard.verdict("Write", {"file_path": "outputs/threads/1/지원서_초안.md"}, OWNERS) is None
 
 
 def test_guard_keeps_notion_read_only_and_other_connectors_out():
@@ -159,3 +182,19 @@ def test_interactions_answer_before_slow_work():
         for respond in ("interaction.response.send_message", "interaction.response.edit_message"):
             if respond in source and "sync_push" in source:
                 assert source.index(respond) < source.index("sync_push"), method.__name__
+
+
+def test_card_text_from_the_ai_has_no_clickable_outside_links():
+    """11/15 점검: 공지 속 지시가 판단 AI에게 가짜 신청 링크를 쓰게 해도 카드에서 눌리지 않는다."""
+    from types import SimpleNamespace
+    from ajou_assistant.notify import build_embed
+    from ajou_assistant.scrape import ListItem
+    from tests.test_reposts import analysis
+    data = analysis()
+    data["action"] = "[지금 신청](https://evil.example/apply?x=1) 후 https://bad.io 확인"
+    data["summary"] = "학교 안내는 [여기](https://www.ajou.ac.kr/kr/notice) 참고"
+    item = ListItem(1, "scholarship", "", "장학", "", "", "2026-11-15", link="https://www.ajou.ac.kr/kr/1")
+    embed = build_embed(item, SimpleNamespace(attachments=[]), Analysis.model_validate(data), [], [], date(2026, 11, 15), False)
+    action = next(field["value"] for field in embed["fields"] if field["name"] == "다음 행동")
+    assert "](https://evil" not in action and "`evil.example`" in action and "`https://bad.io`" in action
+    assert "[여기](https://www.ajou.ac.kr/kr/notice)" in embed["description"]
