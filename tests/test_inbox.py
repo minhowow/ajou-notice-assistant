@@ -128,6 +128,7 @@ def test_mail_check_first_run_is_silent_then_cards_and_same_thread_follow_ups(tm
     assert "ajou:done:mail-m2" in json.dumps(payload["components"])
     state = json.loads((tmp_path / "mail.json").read_text())
     assert state["cards"]["t2"]["message"] == "m1" and set(state["seen"]) == {"m1", "m2", "m3"} and sum(state["low"].values()) == 1
+    assert sum(state["plan_usd"].values()) == 0.02  # 구독 몫 추정치는 git이 아니라 서버 상태에
     inbox.append({"id": "m4", "thread": "t2", "subject": "Re: 추천서 회신", "importance": "normal", "summary": "받았습니다"})
     assert mail.main(discord, None) == 0  # 같은 Gmail 스레드의 다음 메일은 처음 카드의 스레드로
     assert discord.opened == [("700", "m1")] and discord.sent[-1][0] == "m1" and discord.sent[-1][2] == Tier.QUIET

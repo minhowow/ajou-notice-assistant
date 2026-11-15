@@ -284,7 +284,12 @@ def main(discord: Discord, client, dry_run: bool = False) -> int:
         save_state(state)
         return 1
     state["failures"] = 0
-    store.add_usage("mail-plan", spent)  # 구독으로 돈다. 추정치만 남긴다(월 API 합계에서 뺀다).
+    # 구독으로 돈다(청구 아님). 추정치는 git에 올리는 auto/usage가 아니라 서버 상태에 날짜별로 둔다.
+    # 15분마다 auto/를 고치면 커밋되지 않은 변경이 늘 남아 배포의 git pull이 막힌다(11/15).
+    day = store.now().date().isoformat()
+    plan = state.setdefault("plan_usd", {})
+    plan[day] = round(plan.get(day, 0) + spent, 4)
+    state["plan_usd"] = dict(list(plan.items())[-31:])
     new = [mail for mail in mails if mail.id not in seen]
     counts = {"new": len(new), "low": 0, "sent": 0}
     try:
@@ -311,7 +316,6 @@ def main(discord: Discord, client, dry_run: bool = False) -> int:
                 break
     state["seen"] = seen
     state["last"] = store.now().isoformat(timespec="seconds")
-    day = store.now().date().isoformat()
     state.setdefault("low", {})[day] = state.get("low", {}).get(day, 0) + counts["low"]
     state["low"] = dict(list(state["low"].items())[-14:])
     prune(state)
