@@ -31,6 +31,8 @@ log.md를 읽게 한다.
 - `#📥던지기`: 아무거나 던지면 길잡이(router.py)가 맞는 주제의 스레드로 보내 거기서 이어 간다. 애매하면 후보를
   버튼으로 묻는다. 90초 안에 이어 던진 것은 같은 곳으로 간다.
 - 메일(mail.py)과 재공지는 주제 스레드에 한 줄로 붙는다. 봇은 AI를 부르지 않고 쌓아 두었다가 다음 턴 자료로 넘긴다.
+- 자동 진행(autopilot.py): 공지 실행·메일 확인이 스레드에 `-# 자동 진행 <단계> …` 표시를 남기면 대기열에 넣고, 23~8시가
+  아니면 그 단계의 정해진 지시로 턴을 돌린다. 사용자는 그 스레드에 이어 써서 끼어든다.
 
 경계:
 - discord.json에 적은 서버(guild_id)의 소유자(owner_id) 메시지만 받는다. 다른 서버와 다른 사용자는 무시한다.
@@ -54,7 +56,7 @@ from pathlib import Path
 import anthropic
 import discord
 
-from . import english, guard, mail, materials, progress, record, repost, router, store, voice
+from . import autopilot, english, guard, mail, materials, progress, record, repost, router, store, voice
 from .config import (
     ACTIONS_FILE, HOME_DIR, MODEL, PROMPT_FILE, SESSIONS_FILE, STATE_DIR, THREAD_DIR, SetupError, load_discord, load_secrets,
     setting, user_name,
@@ -65,6 +67,8 @@ from .style import apply_style
 from .sync import sync_push
 
 PINS_FILE = STATE_DIR / "pins.json"
+AUTORUN_FILE = STATE_DIR / "autoruns.json"  # 자동 진행 대기열(autopilot.py). 밤에 온 것은 아침까지 기다린다
+AUTORUN_CHECK_SECONDS = 60
 INBOX_FILE = STATE_DIR / "inbox.json"  # 📥 던진 글 → 보낸 주제와 고를 수 있던 후보(버튼용)
 INBOX_KEEP = 200
 THROWN_MARK = "📥"  # 스레드에 남기는 던진 글 사본의 첫 글자
@@ -396,6 +400,13 @@ def save_notice(row: dict, folder: Path, name: str = "notice") -> str:
     return str(target.relative_to(HOME_DIR))
 
 
+class AutoTask:
+    """자동 진행 지시. converse가 받는 Discord 메시지처럼 보이게 한다(글, 첨부 없음). 기록에는 '자동 진행'으로 남는다."""
+
+    def __init__(self, text: str) -> None:
+        self.id, self.content, self.attachments, self.message_snapshots, self.auto = 0, text, [], [], True
+
+
 def card_intro(embed) -> str:
     """메일·공지 카드에서 연 스레드의 첫 턴에 붙일 카드 내용. 카드 글은 바깥에서 온 자료다."""
     parts = [f"이 스레드는 카드 「{embed.title or ''}」에서 열렸다."]
@@ -524,6 +535,7 @@ class Assistant(discord.Client):
         self.loop.create_task(self.style_until_done())
         self.loop.create_task(self.record_loop())
         self.loop.create_task(self.english_loop())
+        self.loop.create_task(self.autopilot_loop())
 
     async def on_ready(self) -> None:
         print(f"연결됨: {self.user} 서버 {len(self.guilds)}개, 스레드 실행: {'구독' if plan_login() else 'API 키'}", flush=True)
@@ -844,6 +856,7 @@ class Assistant(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         if self.user is not None and message.author.id == self.user.id:
             self.note_repost(message)
+            self.queue_autorun(message)
             return
         if message.author.bot or not self.allowed(message.author.id, message.guild.id if message.guild else None):
             return
@@ -967,7 +980,7 @@ class Assistant(discord.Client):
                 said += "\n\n사용자가 올린 파일: " + ", ".join(names)
             parts.append(said)
         said = "\n\n---\n\n".join(parts)
-        record.log_turn(folder, "나", said)
+        record.log_turn(folder, "자동 진행" if all(getattr(item, "auto", False) for item in messages) else "나", said)
         state.update(last=store.now().isoformat(timespec="seconds"), title=thread.name)
         save_sessions(self.sessions)
         spent = store.month_usage("thread")
@@ -1034,6 +1047,66 @@ class Assistant(discord.Client):
             print(traceback.format_exc(), flush=True)
             await thread.send("답장 전송에 실패했습니다. 답은 스레드 기록(log.md)에 남아 있습니다.", **quiet())
         await asyncio.to_thread(sync_push, f"auto: 스레드 {key}", workdir, str(store.USAGE_DIR))
+
+    # ── 자동 진행 (autopilot.py) ──────────────────────────────────
+
+    def queue_autorun(self, message: discord.Message) -> None:
+        """공지 실행·메일 확인이 남긴 진행 표시를 대기열에 넣는다. 턴은 autopilot_loop가 하나씩 돌린다."""
+        parsed = autopilot.parse_tag(message.content)
+        if parsed is None or message.guild is None or message.guild.id != self.guild_id:
+            return
+        level, what, key = parsed
+        data = load_json(AUTORUN_FILE)
+        queue = [job for job in data.get("queue", []) if job.get("key") != key or job.get("thread") != message.channel.id]
+        queue.append({"thread": message.channel.id, "level": level, "what": what, "key": key,
+                      "at": store.now().isoformat(timespec="seconds")})
+        save_json(AUTORUN_FILE, {"queue": queue[-50:]})
+
+    async def autopilot_loop(self) -> None:
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                await self.run_autorun()
+            except Exception:
+                print(traceback.format_exc(), flush=True)
+            await asyncio.sleep(AUTORUN_CHECK_SECONDS)
+
+    async def run_autorun(self) -> bool:
+        """대기열 맨 앞 하나를 돌린다. 밤(23~8시)에는 아침까지 둔다. 돌렸으면 True."""
+        if autopilot.quiet_now():
+            return False
+        queue = load_json(AUTORUN_FILE).get("queue", [])
+        if not queue:
+            return False
+        job = queue.pop(0)
+        save_json(AUTORUN_FILE, {"queue": queue})
+        thread = await self.thread_by_id(int(job["thread"]))
+        if thread is None:
+            return False
+        await self.adopt_thread(thread)
+        print(f"자동 진행 {job['level']}단계 {job['key']} → {thread.id}", flush=True)
+        await self.converse(thread, AutoTask(autopilot.task_prompt(int(job["level"]), job.get("what", "notice"))))
+        return True
+
+    async def adopt_thread(self, thread: discord.Thread) -> dict:
+        """카드에 연 스레드를 그 공지나 카드 내용과 잇는다. 공지면 첫 턴에 원문과 첨부를 받아 둔다(run_messages)."""
+        key = str(thread.id)
+        state = self.sessions.setdefault(key, {"title": thread.name})
+        if state.get("notice") or state.get("intro") or state.get("session"):
+            return state
+        row = notice_for_message(thread.id)
+        if row is not None:
+            state["notice"] = row["id"]
+        else:
+            parent = self.get_channel(thread.parent_id) if getattr(thread, "parent_id", None) else None
+            try:
+                starter = await parent.fetch_message(thread.id) if parent is not None else None
+            except discord.HTTPException:
+                starter = None
+            if starter is not None and starter.embeds:
+                state["intro"] = card_intro(starter.embeds[0])
+        save_sessions(self.sessions)
+        return state
 
     # ── 📥 던지기 (router.py) ─────────────────────────────────────
 

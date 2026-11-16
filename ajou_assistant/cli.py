@@ -35,7 +35,7 @@ from datetime import date, datetime, timedelta
 import anthropic
 import httpx
 
-from . import cloud, english, repost, store
+from . import autopilot, cloud, english, repost, store
 from .config import (
     BOARDS, HEARTBEAT_DIR, LIST_PAGE_SIZE, SESSIONS_FILE, STATE_DIR, Board, SetupError, load_discord, load_secrets, setting,
 )
@@ -202,10 +202,13 @@ def record(item: ListItem, detail: Detail, result: TriageResult, extraction: Ext
 
 
 def deliver(discord: Discord, channel: str, tier: Tier, item: ListItem, detail: Detail, analysis: Analysis, notes, failures, today, changed, originals,
-            calendar_links: dict[str, str] | None = None) -> str | None:
+            calendar_links: dict[str, str] | None = None, autopilot_note: str = "") -> str | None:
     account = load_discord().get("calendar_account", "")
+    embed = build_embed(item, detail, analysis, notes, failures, today, changed)
+    if autopilot_note:
+        embed["fields"].append({"name": "🤖 자동 진행", "value": autopilot_note[:1024]})
     payload = {
-        "embeds": [build_embed(item, detail, analysis, notes, failures, today, changed)],
+        "embeds": [embed],
         "components": build_components(item, analysis, today, account, calendar_links, can_add=calendar_ready()),
     }
     try:
@@ -336,12 +339,16 @@ def handle(item, fetcher, client, discord, today, changed=False, backfill=False,
     if not changed and not backfill:  # 같은 글을 고친 것(changed)은 재공지가 아니다.
         link, extra = find_repost(client, item, result.analysis)
         spent += extra
+    # 몇 단계까지 미리 진행할지는 코드가 규칙표로 정한다(autopilot.py). 1단계 이상이면 캘린더에 넣는다.
+    level, _ = autopilot.decide(autopilot.notice_facts(item, result.analysis, today))
+    if backfill or changed:  # 옛 글 일괄 분석과 고친 글은 다시 진행하지 않는다
+        level = min(level, 1)
     delivered = deliver_repost(discord, item, link) if link else None
     if delivered is not None:
         channel, message_id = delivered
         if not discord.dry_run:
             store.add_repost(item.article_id, link["parent"], link["changes"], "run")
-            if not members_closed(link["root"]):  # 마감이 바뀌었으면 새 날짜만 더한다. 같은 날짜는 묶음 번호로 한 번만.
+            if level >= 1 and not members_closed(link["root"]):  # 마감이 바뀌었으면 새 날짜만 더한다. 같은 날짜는 묶음 번호로 한 번만.
                 add_to_calendar(item, result.analysis, today, link["root"])
     else:
         if link and not discord.dry_run:  # 처음 공지가 알림 없이 끝났던 글. 묶음은 남기고 평소대로 알린다.
@@ -354,9 +361,19 @@ def handle(item, fetcher, client, discord, today, changed=False, backfill=False,
         message_id = None
         # 캘린더에 먼저 넣어야 알림 버튼이 템플릿 화면 대신 실제 일정으로 간다.
         root = link["root"] if link else item.article_id
-        calendar_links = add_to_calendar(item, result.analysis, today, root) if not discord.dry_run else {}
+        calendar_links = add_to_calendar(item, result.analysis, today, root) if level >= 1 and not discord.dry_run else {}
+        key = f"notice:{root}"
+        held = autopilot.claim(key, level) if channel and level >= 2 and not discord.dry_run else "단계 낮음"
         if channel:
-            message_id = deliver(discord, channel, tier, item, detail, result.analysis, notes, extraction.failures, today, changed, originals, calendar_links)
+            message_id = deliver(discord, channel, tier, item, detail, result.analysis, notes, extraction.failures, today, changed, originals,
+                                 calendar_links, autopilot.badge(level, held=held) if level >= 2 else "")
+            if message_id and level >= 2 and not held:
+                try:
+                    autopilot.start_on_card(discord, channel, message_id, item.title, level, key, "notice")
+                except DiscordError as error:
+                    if error.is_outage:
+                        raise
+                    print(f"자동 진행 시작 실패 {item.article_id}: {error}")
     if not discord.dry_run:  # 시험 실행이 처리 기록을 남기면 서버와 기록이 갈라진다.
         record(item, detail, result, extraction, notes, channel, message_id, changed, backfill)
     outcome = {"hash": detail.content_hash, "status": "done", "relevance": result.analysis.relevance,

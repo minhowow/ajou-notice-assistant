@@ -250,7 +250,12 @@ def add_events(mail: Mail) -> list[str]:
     return lines
 
 
-def note(mail: Mail, calendar: list[str] | None = None) -> str:
+def listed(mail: Mail) -> list[str]:
+    """캘린더에 넣지 않는 단계일 때 카드에 적기만 할 줄."""
+    return [f"{_when(event)} {event.title}" for event in mail.events]
+
+
+def note(mail: Mail, calendar: list[str] | None = None, robot: str = "") -> str:
     """주제 스레드에 붙이는 한 줄. 마지막 줄의 표시로 봇이 메일 알림임을 알아보고 다음 턴 자료로 쌓는다."""
     lines = [f"📧 **{_clip(mail.subject or '(제목 없음)', 120)}** · {_clip(mail.sender, 60)}",
              plain_links(_clip(mail.summary, 600), TRUSTED)]
@@ -258,13 +263,15 @@ def note(mail: Mail, calendar: list[str] | None = None) -> str:
         lines.append("할 일: " + plain_links(_clip(mail.action, 300), TRUSTED) + (f" · 기한 {mail.deadline}" if mail.deadline else ""))
     if calendar:
         lines.append("📅 " + " / ".join(calendar))
+    if robot:
+        lines.append(robot)
     if mail.url:
         lines.append(f"<{mail.url}>")
     lines.append(f"{MAIL_TAG}{mail.id}")
     return "\n".join(lines)
 
 
-def card(mail: Mail, calendar: list[str] | None = None) -> dict:
+def card(mail: Mail, calendar: list[str] | None = None, robot: str = "") -> dict:
     fields = [{"name": "보낸 사람", "value": _clip(mail.sender or "-", 200), "inline": True},
               {"name": "분류", "value": mail.kind, "inline": True}]
     if mail.action:
@@ -273,6 +280,8 @@ def card(mail: Mail, calendar: list[str] | None = None) -> dict:
         fields.append({"name": "기한", "value": mail.deadline, "inline": True})
     if calendar:
         fields.append({"name": "📅 캘린더", "value": _clip("\n".join(calendar), 1000)})
+    if robot:
+        fields.append({"name": "🤖 자동 진행", "value": _clip(robot, 1000)})
     embed = {"title": _clip(mail.subject or "(제목 없음)", 256), "description": plain_links(_clip(mail.summary, 2000), TRUSTED),
              "color": COLORS.get(mail.importance, COLORS["normal"]), "fields": fields,
              "footer": {"text": _clip(f"메일 · {mail.date}", 200)}}
@@ -303,15 +312,26 @@ def deliver(discord: Discord, client, mail: Mail, state: dict, sessions: dict) -
     """메일 한 통을 알린다. 무엇을 했는지 짧게 돌려준다."""
     from . import router
     from .router import Topic
+    from . import autopilot
     cards = state.setdefault("cards", {})
     tier = Tier.NOTIFY if mail.importance == "high" else Tier.QUIET
-    calendar = add_events(mail)
+    # 몇 단계까지 미리 진행할지는 규칙표가 정한다(autopilot.py). 학교 밖 발신은 규칙과 상관없이 캘린더에 넣지 않는다.
+    level, _ = autopilot.decide(autopilot.mail_facts(mail, from_school(mail)))
+    calendar = add_events(mail) if level >= 1 else listed(mail)
+    key = f"mail:{mail.thread}"
+    held = autopilot.claim(key, level) if level >= 2 and not discord.dry_run else "단계 낮음"
+    robot = autopilot.badge(level, held=held) if level >= 2 else ""
+
+    def proceed(thread: str | None) -> None:
+        if thread and level >= 2 and not held:
+            discord.send(thread, {"content": autopilot.task_line(level, key, "mail"), "flags": SUPPRESS_EMBEDS}, tier=Tier.QUIET)
     known = cards.get(mail.thread)
     if known:  # 같은 Gmail 스레드의 다음 메일은 처음 카드(또는 처음 붙인 주제)로 간다.
         topic = Topic(f"card:{known['channel']}:{known['message']}", "mail", known.get("subject", ""), "",
                       thread=str(known.get("topic_thread", "")), channel=str(known["channel"]), message=str(known["message"]))
-        thread = post_to_topic(discord, topic, note(mail, calendar), tier)
-        return f"같은 메일 스레드 → {thread}" + (f" · 일정 {len(calendar)}" if calendar else "")
+        thread = post_to_topic(discord, topic, note(mail, calendar, robot), tier)
+        proceed(thread)
+        return f"같은 메일 스레드 → {thread}" + (f" · 일정 {len(calendar)}" if calendar else "") + (f" · {level}단계" if robot else "")
     decision = None
     if client is not None:
         try:
@@ -322,14 +342,17 @@ def deliver(discord: Discord, client, mail: Mail, state: dict, sessions: dict) -
         except Exception as error:  # 길 찾기가 실패하면 카드로 낸다. 알림이 빠지지는 않는다.
             print(f"메일 길 찾기 실패 {mail.id}: {type(error).__name__}: {str(error)[:150]}")
     if decision is not None and decision.confident and decision.target is not None:
-        thread = post_to_topic(discord, decision.target, note(mail, calendar), tier)
+        thread = post_to_topic(discord, decision.target, note(mail, calendar, robot), tier)
+        proceed(thread)
         if thread:
             cards[mail.thread] = {"channel": decision.target.channel or thread, "message": decision.target.message or thread,
                                   "topic_thread": thread, "subject": mail.subject, "from": mail.sender,
                                   "at": store.now().isoformat(timespec="seconds"), "routed": decision.target.title}
             return f"주제 「{decision.target.title}」 → {thread}"
     channel = "mail" if "mail" in discord.channels else "general"
-    message_id = discord.send(channel, card(mail, calendar), tier=tier)
+    message_id = discord.send(channel, card(mail, calendar, robot), tier=tier)
+    if message_id and level >= 2 and not held:
+        proceed(discord.open_thread(channel, message_id, mail.subject or "메일"))
     if message_id:
         cards[mail.thread] = {"channel": str(discord.channels.get(channel, channel)), "message": str(message_id),
                               "subject": mail.subject, "from": mail.sender, "at": store.now().isoformat(timespec="seconds")}
