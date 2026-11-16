@@ -45,11 +45,18 @@ def test_rule_table_sets_the_level_and_caps_win():
     assert autopilot.decide(facts(relevance="low"))[0] == 0
     asks = facts(category="academic", from_others=[{"document": "추천서", "who": "지도교수", "lead_days": 7}])
     assert autopilot.decide(asks)[0] == 2
-    exam = mail.Mail(id="m", thread="t", sender="<do-not-reply@blackboard.com>", events=[mail.MailEvent(title="기말", date="2026-12-18")])
-    assert autopilot.decide(autopilot.mail_facts(exam, True))[0] == 1
-    assert autopilot.decide(autopilot.mail_facts(exam, False))[0] == 0  # 학교 밖 발신은 캘린더도 하지 않는다
-    professor = mail.Mail(id="p", thread="t2", kind="교수·교직원", action="서명본 회신")
+    event = [mail.MailEvent(title="기말", date="2026-12-18")]
+    exam = mail.Mail(id="m", thread="t", sender="<do-not-reply@blackboard.com>", relevance="medium", events=event)
+    assert autopilot.decide(autopilot.mail_facts(exam, True))[0] == 1  # 내 수업(아주Bb) 메일
+    # 11/16 선배만남의 날: 학교 발신이지만 나와 관련이 낮다 → 캘린더에 넣지 않는다
+    career = mail.Mail(id="c", thread="t3", sender="직원 <x@ajou.ac.kr>", relevance="low", events=event)
+    assert autopilot.decide(autopilot.mail_facts(career, True))[0] == 0
+    assert autopilot.decide(autopilot.mail_facts(career.model_copy(update={"relevance": "high"}), True))[0] == 1
+    outside = mail.Mail(id="o", thread="t4", sender="광고 <ad@example.com>", relevance="high", events=event)
+    assert autopilot.decide(autopilot.mail_facts(outside, False))[0] == 0  # 학교 밖 발신은 캘린더도 하지 않는다
+    professor = mail.Mail(id="p", thread="t2", kind="교수·교직원", action="서명본 회신", relevance="high")
     assert autopilot.decide(autopilot.mail_facts(professor, True))[0] == 2
+    assert autopilot.decide(autopilot.mail_facts(professor.model_copy(update={"relevance": "none"}), True))[0] == 0
 
 
 def test_claim_once_per_topic_with_a_daily_limit_and_shadow_mode(state):

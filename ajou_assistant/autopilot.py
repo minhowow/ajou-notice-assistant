@@ -30,11 +30,14 @@ DEFAULT = {
         # 1단계: v0.6.6까지 코드에 박혀 있던 캘린더 규칙을 옮긴 것
         {"name": "관련 높은 공지의 일정", "when": {"source": "notice", "relevance": ["high"], "eligibility": ["likely", "unknown"]}, "level": 1},
         {"name": "자격이 확실한 보통 공지의 마감", "when": {"source": "notice", "relevance": ["medium"], "eligibility": ["likely"]}, "level": 1},
-        {"name": "학교 메일의 날짜가 정해진 일", "when": {"source": "mail", "trusted": True, "has_events": True}, "level": 1},
+        # 메일은 v0.7.1부터 이 학생 기준 관련도가 있다. 학교 발신이라고 모두 넣지 않는다(11/16 선배만남의 날 사례).
+        {"name": "나와 관련 높은 학교 메일의 일정", "when": {"source": "mail", "trusted": True, "has_events": True, "relevance": ["high"]}, "level": 1},
+        {"name": "내 수업(아주Bb) 메일의 일정", "when": {"source": "mail", "blackboard": True, "has_events": True}, "level": 1},
         # 2단계: 준비
         {"name": "남에게 부탁할 서류가 있는 공지", "when": {"source": "notice", "relevance": ["high", "medium"],
                                                   "eligibility": ["likely", "unknown"], "has_asks": True}, "level": 2},
-        {"name": "교수·교직원 메일의 할 일", "when": {"source": "mail", "trusted": True, "kind": ["교수·교직원"], "has_action": True}, "level": 2},
+        {"name": "교수·교직원 메일의 할 일", "when": {"source": "mail", "trusted": True, "kind": ["교수·교직원"], "has_action": True,
+                                              "relevance": ["high", "medium"]}, "level": 2},
         # 3단계: 초안
         {"name": "자격 되는 장학·국제·활동", "when": {"source": "notice", "category": ["scholarship", "international", "activity"],
                                               "relevance": ["high"], "eligibility": ["likely"]}, "level": 3},
@@ -72,8 +75,10 @@ def notice_facts(item, analysis, today) -> dict:
 
 
 def mail_facts(mail, trusted: bool) -> dict:
-    return {"source": "mail", "kind": mail.kind, "importance": mail.importance, "has_events": bool(mail.events),
-            "has_action": bool(mail.action.strip()), "trusted": trusted}
+    from .mail import from_blackboard
+    return {"source": "mail", "kind": mail.kind, "importance": mail.importance, "relevance": mail.relevance,
+            "has_events": bool(mail.events), "has_action": bool(mail.action.strip()), "trusted": trusted,
+            "blackboard": from_blackboard(mail)}
 
 
 def matches(when: dict, facts: dict) -> bool:

@@ -1,5 +1,5 @@
 {
-  "_comment": "설정 폴더(AJOU_CONFIG_DIR)에 autopilot.json으로 두면 기본 규칙 대신 쓴다. 단계: 0 알림, 1 캘린더, 2 준비, 3 초안. level은 그 단계까지 올리고 max는 그 단계로 자른다. 맞는 규칙 중 가장 높은 level을 가장 낮은 max로 자른다. when의 값이 목록이면 그중 하나, 참·거짓이면 그대로 맞아야 한다. 공지 사실: source(notice), board, category, relevance, eligibility, has_deadline, has_events, has_asks. 메일 사실: source(mail), kind, importance, has_events, has_action, trusted(학교 발신). shadow를 true로 하면 2·3단계를 카드에 적기만 하고 진행하지 않는다.",
+  "_comment": "설정 폴더(AJOU_CONFIG_DIR)에 autopilot.json으로 두면 기본 규칙 대신 쓴다. 단계: 0 알림, 1 캘린더, 2 준비, 3 초안. level은 그 단계까지 올리고 max는 그 단계로 자른다. 맞는 규칙 중 가장 높은 level을 가장 낮은 max로 자른다. when의 값이 목록이면 그중 하나, 참·거짓이면 그대로 맞아야 한다. 공지 사실: source(notice), board, category, relevance, eligibility, has_deadline, has_events, has_asks. 메일 사실: source(mail), kind, importance, has_events, has_action, relevance(이 학생 기준 관련도), trusted(학교 발신), blackboard(아주Bb 알림). shadow를 true로 하면 2·3단계를 카드에 적기만 하고 진행하지 않는다.",
   "daily_limit": 3,
   "quiet_hours": [
     23,
@@ -35,10 +35,22 @@
       "level": 1
     },
     {
-      "name": "학교 메일의 날짜가 정해진 일",
+      "name": "나와 관련 높은 학교 메일의 일정",
       "when": {
         "source": "mail",
         "trusted": true,
+        "has_events": true,
+        "relevance": [
+          "high"
+        ]
+      },
+      "level": 1
+    },
+    {
+      "name": "내 수업(아주Bb) 메일의 일정",
+      "when": {
+        "source": "mail",
+        "blackboard": true,
         "has_events": true
       },
       "level": 1
@@ -67,7 +79,11 @@
         "kind": [
           "교수·교직원"
         ],
-        "has_action": true
+        "has_action": true,
+        "relevance": [
+          "high",
+          "medium"
+        ]
       },
       "level": 2
     },

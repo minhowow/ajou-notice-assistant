@@ -301,3 +301,16 @@ def test_school_mail_events_go_to_the_calendar_and_others_are_only_listed(monkey
     assert "📅" in json.dumps(mail.card(exam, lines), ensure_ascii=False)
     outside = mail.Mail(id="m10", thread="t10", sender="광고 <ad@example.com>", events=[mail.MailEvent(title="세일", date="2026-12-01")])
     assert mail.add_events(outside) == ["12/01 세일 (캘린더에 넣지 않음: 학교 밖 발신)"] and len(added) == 1
+
+
+
+def test_mail_relevance_uses_the_profile_and_unrelated_school_mail_is_only_counted(tmp_path, monkeypatch):
+    """11/16: '선배만남의 날(항공사·홈쇼핑)'이 학교 발신이라는 이유만으로 카드와 캘린더에 들어갔다."""
+    monkeypatch.setattr(mail, "profile", lambda: "소프트웨어학과 2학년. 개발·교환학생 준비.")
+    args, prompt = mail.command([], mail.profile())
+    assert "<학생_프로필>" in prompt and "소프트웨어학과" in prompt and "relevance" in prompt
+    career = mail.Mail(id="c", thread="t", kind="장학·프로그램", relevance="low")
+    personal = mail.Mail(id="p", thread="t2", kind="교수·교직원", relevance="low")
+    course = mail.Mail(id="b", thread="t3", kind="수업", relevance="none")
+    assert mail.quiet(career) and not mail.quiet(personal) and not mail.quiet(course)
+    assert mail.Mail(id="x", thread="y", relevance="이상한 값").relevance == "medium"
