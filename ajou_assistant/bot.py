@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import os
 import shlex
 import shutil
@@ -739,7 +740,7 @@ class Assistant(discord.Client):
         state = self.sessions.setdefault(key, {"title": thread.name})
         was_archived = bool(getattr(thread, "archived", False))
         try:
-            await self.flush_thread(key, thread)
+            await self.flush_thread(key, thread, followup=False)
         except Exception:  # 기록이 실패해도 닫는다. log.md 원문은 남아 있고, 다시 열면 그때 정리한다.
             print(traceback.format_exc(), flush=True)
         await self.drop_close_button(thread.id)
@@ -1059,7 +1060,7 @@ class Assistant(discord.Client):
         data = load_json(AUTORUN_FILE)
         queue = [job for job in data.get("queue", []) if job.get("key") != key or job.get("thread") != message.channel.id]
         queue.append({"thread": message.channel.id, "level": level, "what": what, "key": key,
-                      "at": store.now().isoformat(timespec="seconds")})
+                      "steps": autopilot.steps_from(message.content), "at": store.now().isoformat(timespec="seconds")})
         save_json(AUTORUN_FILE, {"queue": queue[-50:]})
 
     async def autopilot_loop(self) -> None:
@@ -1085,7 +1086,8 @@ class Assistant(discord.Client):
             return False
         await self.adopt_thread(thread)
         print(f"자동 진행 {job['level']}단계 {job['key']} → {thread.id}", flush=True)
-        await self.converse(thread, AutoTask(autopilot.task_prompt(int(job["level"]), job.get("what", "notice"))))
+        prompt = job.get("prompt") or autopilot.task_prompt(int(job["level"]), job.get("what", "notice"), job.get("steps"))
+        await self.converse(thread, AutoTask(prompt))
         return True
 
     async def adopt_thread(self, thread: discord.Thread) -> dict:
@@ -1655,8 +1657,12 @@ class Assistant(discord.Client):
                         print(traceback.format_exc(), flush=True)
             await asyncio.sleep(RECORD_CHECK_SECONDS)
 
-    async def flush_thread(self, key: str, thread: discord.Thread | None = None) -> bool:
-        """아직 정리하지 않은 대화를 기록으로 옮긴다. 정리할 것이 없었으면 False."""
+    async def flush_thread(self, key: str, thread: discord.Thread | None = None, followup: bool = True) -> bool:
+        """아직 정리하지 않은 대화를 기록으로 옮긴다. 정리할 것이 없었으면 False.
+
+        기록은 records/에 조용히 남긴다. 스레드에는 바깥에 반영한 것만 알린다. 사용자가 말한 뒤 멈춘 대화에 비서가 해 둘
+        수 있는 일(문서 정리, 초안 보완)이 남았으면 후속 정리 턴을 대기열에 넣는다(11/16 사용자 결정). 닫을 때는 하지 않는다.
+        """
         from .cli import cost
 
         state = self.sessions.setdefault(key, {})
@@ -1687,6 +1693,14 @@ class Assistant(discord.Client):
         save_sessions(self.sessions)
         await asyncio.to_thread(sync_push, f"auto: 대화 기록 {title[:40]}", str(folder.relative_to(HOME_DIR)),
                                 str(record.RECORDS_DIR), str(ACTIONS_FILE), str(store.USAGE_DIR))
+        work, mine = record.leftovers(result)
+        spoke = re.search(r"^### .+ · 나$", text, re.M) is not None  # 후속 정리 턴 뒤에는 다시 하지 않는다(사용자 말이 없으면)
+        if followup and work and spoke and not state.get("done") and autopilot.claim_followup(key):
+            data = load_json(AUTORUN_FILE)
+            data.setdefault("queue", []).append({"thread": int(key), "level": 0, "what": "followup", "key": f"followup:{key}:{end}",
+                                                 "prompt": record.followup_prompt(work, mine), "at": now.isoformat(timespec="seconds")})
+            save_json(AUTORUN_FILE, {"queue": data["queue"][-50:]})
+            print(f"후속 정리 대기 {key}: {len(work)}건", flush=True)
         summary = record.discord_summary(result, extra)
         if summary and not state.get("done"):  # 닫은 스레드에 쓰면 다시 열린다.
             target = thread or self.get_channel(int(key))

@@ -347,15 +347,17 @@ def deliver(discord: Discord, client, mail: Mail, state: dict, sessions: dict) -
     cards = state.setdefault("cards", {})
     tier = Tier.NOTIFY if mail.importance == "high" else Tier.QUIET
     # 몇 단계까지 미리 진행할지는 규칙표가 정한다(autopilot.py). 학교 밖 발신은 규칙과 상관없이 캘린더에 넣지 않는다.
-    level, _ = autopilot.decide(autopilot.mail_facts(mail, from_school(mail)))
+    facts = autopilot.mail_facts(mail, from_school(mail))
+    level, _ = autopilot.decide(facts)
+    steps = autopilot.plan(level, facts)
     calendar = add_events(mail) if level >= 1 else listed(mail)
     key = f"mail:{mail.thread}"
     held = autopilot.claim(key, level) if level >= 2 and not discord.dry_run else "단계 낮음"
-    robot = autopilot.badge(level, held=held) if level >= 2 else ""
+    robot = autopilot.badge(level, held=held, steps=steps) if level >= 2 else ""
 
     def proceed(thread: str | None) -> None:
         if thread and level >= 2 and not held:
-            discord.send(thread, {"content": autopilot.task_line(level, key, "mail"), "flags": SUPPRESS_EMBEDS}, tier=Tier.QUIET)
+            discord.send(thread, {"content": autopilot.task_line(level, key, "mail", steps), "flags": SUPPRESS_EMBEDS}, tier=Tier.QUIET)
     known = cards.get(mail.thread)
     if known:  # 같은 Gmail 스레드의 다음 메일은 처음 카드(또는 처음 붙인 주제)로 간다.
         topic = Topic(f"card:{known['channel']}:{known['message']}", "mail", known.get("subject", ""), "",

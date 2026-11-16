@@ -43,7 +43,8 @@ RULES = """너는 대학생 {user}의 기록 담당이다. Discord 대화 기록
 - decisions: 무엇을 하기로(하지 않기로) 했는지. 공지 번호가 주어졌고 그 공지에 대한 결정이면 notice_id에 그 번호를, 아니면 빈 문자열.
   status: applied(신청·제출 완료), will_apply(할 예정), attending(참석), not_attending(불참), done(처리 끝), skip(관심 없음), undecided(미정), other.
 - facts: 사용자에 대해 앞으로도 쓸 사실(경력, 활동, 상황, 선호). 이미 대화에서 정정된 내용은 정정된 쪽만.
-- todos: 사용자가 해야 할 일. due는 기한.
+- todos: 아직 끝나지 않은 일. due는 기한. owner는 누가 할 수 있는지다: assistant는 비서가 이 대화 안에서 해 둘 수 있는
+  문서 작업(정리, 초안 쓰기·보완, 요약, 표·체크리스트 만들기), me는 사용자만 할 수 있는 일(제출, 연락, 방문, 결정, 서명).
 - events: 사용자가 참석하거나 지켜야 할 날짜와 시각이 있는 일정. 같은 일정이 여러 날이면 날짜마다 하나씩. attending은 사용자가 참석한다고 했으면 attending, 안 간다고 했으면 not_attending, 모르면 undecided.
 - questions: 비서가 물었지만 아직 답을 못 받은 것.
 - 날짜는 YYYY-MM-DD, 시각은 HH:MM(24시간). 모르면 빈 문자열. 연도가 없으면 오늘 날짜를 기준으로 가장 가까운 미래로 본다.
@@ -63,7 +64,7 @@ SCHEMA = {
         "decisions": _items({"about": {"type": "string"}, "decision": {"type": "string"},
                              "notice_id": {"type": "string"}, "status": {"type": "string", "enum": STATUSES}}),
         "facts": _items({"area": {"type": "string", "enum": AREAS}, "fact": {"type": "string"}}),
-        "todos": _items({"task": {"type": "string"}, "due": {"type": "string"}}),
+        "todos": _items({"task": {"type": "string"}, "due": {"type": "string"}, "owner": {"type": "string", "enum": ["me", "assistant"]}}),
         "events": _items({"title": {"type": "string"}, "date": {"type": "string"}, "time": {"type": "string"},
                           "minutes": {"type": "integer"},
                           "attending": {"type": "string", "enum": ["attending", "not_attending", "undecided"]}}),
@@ -193,15 +194,31 @@ def is_empty(result: dict) -> bool:
 
 
 def discord_summary(result: dict, extra: list[str]) -> str:
-    """스레드에 남길 짧은 확인 메시지. 틀린 것이 있으면 사용자가 바로 정정할 수 있게 한다."""
-    if is_empty(result):
+    """스레드에 남길 메시지. 바깥에 반영한 것(캘린더, 공지 독촉)만 알린다.
+
+    11/16 사용자 결정: 대화가 멈출 때마다 '📝 기록했습니다' 목록을 올리던 것은 없앴다. 기록은 records/에 조용히 남고,
+    마무리되지 않은 일 중 비서가 할 수 있는 것은 후속 정리(followup_prompt)로 이어서 한다.
+    """
+    if not extra:
         return ""
-    lines = ["📝 **기록했습니다** (틀린 것은 이 스레드에 정정해 주세요)"]
-    lines += [f"- 결정: {d['about']} → {d['decision']}" for d in result["decisions"]]
-    lines += [f"- 사실: {f['fact']}" for f in result["facts"]]
-    lines += [f"- 할 일: {t['task']}" + (f" ({t['due']})" if t["due"] else "") for t in result["todos"]]
-    lines += [f"- 일정: {e['date']} {e['time']} {e['title']}" for e in result["events"]]
-    lines += [f"- 반영: {line}" for line in extra]
-    if result["questions"]:
-        lines.append("- 아직 답이 필요한 것: " + " / ".join(result["questions"]))
-    return "\n".join(lines)
+    return "📌 반영했습니다: " + " / ".join(extra)
+
+
+def leftovers(result: dict) -> tuple[list[str], list[str]]:
+    """(비서가 해 둘 수 있는 일, 사용자만 할 수 있는 일)."""
+    def line(todo: dict) -> str:
+        return todo["task"] + (f" (기한 {todo['due']})" if todo.get("due") else "")
+    mine = [line(todo) for todo in result.get("todos", []) if todo.get("owner", "me") != "assistant"]
+    theirs = [line(todo) for todo in result.get("todos", []) if todo.get("owner") == "assistant"]
+    return theirs, mine
+
+
+def followup_prompt(work: list[str], mine: list[str]) -> str:
+    listing = "\n".join(f"{index}. {task}" for index, task in enumerate(work, start=1))
+    own = "\n".join(f"- {task}" for task in mine) or "- (없음)"
+    return ("[후속 정리] 이 대화가 30분 멈췄다. 마무리되지 않은 것 중 비서가 해 둘 수 있는 것만 해 둔다.\n"
+            f"{listing}\n"
+            "- 결과는 작업 폴더의 파일로 남긴다. 같은 일을 다룬 파일이 있으면 그 파일을 고친다.\n"
+            "- 사용자에게 다시 묻지 않는다. 판단할 정보가 없으면 [확인 필요]로 남긴다. 경험이나 수치를 지어내지 않는다.\n"
+            "- 스레드에는 한 일과 파일 이름, 그리고 사용자가 직접 할 일을 짧게 쓴다. 사용자가 할 일:\n"
+            f"{own}\n- 제출과 발송은 하지 않는다.")

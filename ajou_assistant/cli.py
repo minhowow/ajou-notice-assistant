@@ -340,7 +340,8 @@ def handle(item, fetcher, client, discord, today, changed=False, backfill=False,
         link, extra = find_repost(client, item, result.analysis)
         spent += extra
     # 몇 단계까지 미리 진행할지는 코드가 규칙표로 정한다(autopilot.py). 1단계 이상이면 캘린더에 넣는다.
-    level, _ = autopilot.decide(autopilot.notice_facts(item, result.analysis, today))
+    facts = autopilot.notice_facts(item, result.analysis, today)
+    level, _ = autopilot.decide(facts)
     if backfill or changed:  # 옛 글 일괄 분석과 고친 글은 다시 진행하지 않는다
         level = min(level, 1)
     delivered = deliver_repost(discord, item, link) if link else None
@@ -366,10 +367,10 @@ def handle(item, fetcher, client, discord, today, changed=False, backfill=False,
         held = autopilot.claim(key, level) if channel and level >= 2 and not discord.dry_run else "단계 낮음"
         if channel:
             message_id = deliver(discord, channel, tier, item, detail, result.analysis, notes, extraction.failures, today, changed, originals,
-                                 calendar_links, autopilot.badge(level, held=held) if level >= 2 else "")
+                                 calendar_links, autopilot.badge(level, held=held, steps=autopilot.plan(level, facts)) if level >= 2 else "")
             if message_id and level >= 2 and not held:
                 try:
-                    autopilot.start_on_card(discord, channel, message_id, item.title, level, key, "notice")
+                    autopilot.start_on_card(discord, channel, message_id, item.title, level, key, "notice", autopilot.plan(level, facts))
                 except DiscordError as error:
                     if error.is_outage:
                         raise

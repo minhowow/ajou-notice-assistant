@@ -113,7 +113,7 @@ def helper(tmp_path, monkeypatch):
             return assistant.threads[channel_id]
         raise discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "Unknown Channel")
 
-    async def flush_thread(key, thread=None):
+    async def flush_thread(key, thread=None, followup=True):
         assistant.events.append(("flush", key))
         assistant.flushed.append(key)
         return True

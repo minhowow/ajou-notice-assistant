@@ -427,9 +427,15 @@ def test_record_applies_notice_decisions_and_writes_month_file(tmp_path, monkeyp
     written = path.read_text()
     assert "연속 특강 → 3회 신청 (공지 377587)" in written and "기한 2026-11-03" in written
     assert (tmp_path / "records" / "data" / "2026-11.jsonl").exists()
-    assert "기록했습니다" in record.discord_summary(result, lines)
-    empty = {key: [] for key in ("decisions", "facts", "todos", "events", "questions")}
-    assert record.discord_summary({"summary": "잡담", **empty}, []) == ""
+    # 11/16: 기록 목록 메시지는 없앴다. 바깥에 반영한 것만 알린다.
+    assert record.discord_summary(result, lines) == "📌 반영했습니다: 공지 377587 독촉 끔 (applied)"
+    assert record.discord_summary(result, []) == ""
+    result["todos"] = [{"task": "줌 링크 확인", "due": "2026-11-03", "owner": "me"},
+                       {"task": "발표 대본을 3분 분량으로 다듬기", "due": "", "owner": "assistant"}]
+    work, mine = record.leftovers(result)
+    assert work == ["발표 대본을 3분 분량으로 다듬기"] and mine == ["줌 링크 확인 (기한 2026-11-03)"]
+    prompt = record.followup_prompt(work, mine)
+    assert prompt.startswith("[후속 정리]") and "1. 발표 대본" in prompt and "- 줌 링크 확인" in prompt and "다시 묻지 않는다" in prompt
 
 
 def test_record_schema_requires_every_field():

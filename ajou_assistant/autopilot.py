@@ -4,8 +4,10 @@
   정한다. 같은 공지는 언제나 같은 단계이고, 공지 속 숨은 지시가 단계를 마음대로 올리지 못한다.
 - 단계: 0 알림 · 1 캘린더 · 2 준비(체크리스트, 남에게 부탁할 서류의 부탁 메일 초안, 답장 초안) · 3 초안(지원서·신청서 양식).
 - 1단계는 공지 실행과 메일 확인이 코드로 한다(캘린더). 2·3단계는 카드에 스레드를 열고 그 스레드의 Claude Code
-  세션이 그 단계까지 진행한다. 사용자가 끼어들고 싶으면 그 스레드에 이어 쓰면 된다(11/16 사용자: 단계를 늘리지
-  않고 채팅을 이어 가는 것으로).
+  세션이 그 단계까지 진행한다. 다 자동으로 끝나므로 사용자는 끼어들지 않고, 이어서 할 일이 있으면 그 스레드에
+  쓴다(11/16 사용자: 끼어들기는 사실상 후속 진행뿐이다).
+- 카드와 스레드에는 'N단계'가 아니라 판정된 범위에서 실제로 할 일을 적는다(plan). Claude 지시도 같은 목록으로 만든다
+  (11/16 사용자: 신청서까지 작성한다, 캘린더에 추가한다처럼 자세히).
 - 바깥에 흔적이 남는 일(캘린더)은 믿을 수 있는 출처(학교 게시판, 학교 메일)만. 제출·발송은 어느 단계에도 없다.
 - 같은 주제는 한 번만 진행한다(재공지 묶음 단위). 2단계 이상은 하루 상한이 있고, 23~8시에 온 것은 아침에 한다.
 - 규칙표는 설정 폴더의 `autopilot.json`(없으면 DEFAULT). `shadow: true`면 단계만 카드에 적고 진행하지 않는다.
@@ -24,6 +26,7 @@ NAMES = {0: "알림", 1: "캘린더", 2: "준비", 3: "초안"}
 AUTO_TAG = "-# 자동 진행 "
 DEFAULT = {
     "daily_limit": 3,
+    "followup_limit": 5,  # 대화가 멈춘 뒤 비서가 남은 문서 일을 마무리하는 후속 정리(record.followup_prompt) 하루 상한
     "quiet_hours": [23, 8],
     "shadow": False,
     "rules": [
@@ -45,18 +48,8 @@ DEFAULT = {
         {"name": "채용 공고는 캘린더까지", "when": {"board": ["recruit"]}, "max": 1},
     ],
 }
-TASKS = {
-    2: ("[자동 진행 2단계: 준비] 이 스레드의 {what}을 보고 준비를 해 둔다.\n"
-        "1. 자격과 마감을 내 상황(CURRENT_PROFILE.md, private_facts.md)과 대조해 한 줄로 정리한다.\n"
-        "2. 준비물 체크리스트를 만든다: 서류, 누구에게 받는지, 언제까지(마감에서 거꾸로 센다).\n"
-        "3. 남에게 부탁할 서류가 있으면 부탁 메일 초안을, 메일에 답해야 하면 답장 초안을 쓴다.\n"
-        "결과는 작업 폴더에 `준비.md`로 저장하고, 스레드에는 세 줄 요약과 파일 이름만 쓴다. 제출과 발송은 하지 않는다."),
-    3: ("[자동 진행 3단계: 초안] 이 스레드의 {what}을 보고 지원 초안까지 만든다.\n"
-        "1. 먼저 2단계 준비를 한다: 자격·마감 정리, 준비물 체크리스트, 부탁 메일 초안(`준비.md`).\n"
-        "2. 첨부에 지원서·신청서 양식이 있으면 칸 순서대로 내 정보로 채운 초안을 `초안.md`에 만든다. 양식이 없으면 "
-        "자기소개·지원 동기 초안을 쓴다. 모르는 칸은 [확인 필요]로 비우고 지어내지 않는다.\n"
-        "스레드에는 요약, 남은 빈칸, 파일 이름만 쓴다. 제출과 발송은 하지 않는다."),
-}
+CALENDAR_STEP = "일정을 캘린더에 넣음"
+FILES = "결과는 작업 폴더에 남긴다: 체크리스트·부탁 메일·답장 초안은 `준비.md`, 지원서·신청서 초안은 `초안.md`."
 
 
 def load_rules() -> dict:
@@ -71,7 +64,24 @@ def notice_facts(item, analysis, today) -> dict:
     left = [deadline for deadline in analysis.deadlines if deadline.date >= today.isoformat()]
     return {"source": "notice", "board": item.board_key, "category": analysis.category, "relevance": analysis.relevance,
             "eligibility": analysis.eligibility, "has_deadline": any(deadline.kind == "deadline" for deadline in left),
-            "has_events": bool(left), "has_asks": bool(analysis.from_others), "trusted": True}
+            "has_events": bool(left), "has_asks": bool(analysis.from_others), "trusted": True,
+            "asks": [f"{prep.who}: {prep.document}" for prep in analysis.from_others][:3]}
+
+
+def plan(level: int, facts: dict) -> list[str]:
+    """판정된 단계에서 실제로 할 일. 카드·스레드 안내와 Claude 지시에 같이 쓴다."""
+    steps = []
+    if level >= 1 and facts.get("has_events"):
+        steps.append(CALENDAR_STEP)
+    if level >= 2:
+        steps.append("자격·마감을 내 상황과 대조해 정리하고, 마감에서 거꾸로 센 준비물 체크리스트를 만듦")
+        if facts.get("asks"):
+            steps.append("남에게 부탁할 서류의 부탁 메일 초안 (" + ", ".join(facts["asks"]) + ")")
+        if facts.get("source") == "mail" and facts.get("has_action"):
+            steps.append("이 메일에 보낼 답장 초안")
+    if level >= 3:
+        steps.append("지원서·신청서 양식을 내 정보로 채운 초안 (모르는 칸은 [확인 필요])")
+    return steps
 
 
 def mail_facts(mail, trusted: bool) -> dict:
@@ -115,16 +125,17 @@ def save_state(state: dict) -> None:
     temporary.replace(STATE_FILE)
 
 
-def badge(level: int, rules: dict | None = None, held: str = "") -> str:
-    """카드에 붙이는 한 줄."""
+def badge(level: int, rules: dict | None = None, held: str = "", steps: list[str] | None = None) -> str:
+    """카드에 붙이는 안내. 판정된 범위에서 할 일을 그대로 적는다."""
     if level < 2:
         return ""
     rules = rules or load_rules()
+    listing = "\n".join(f"· {step}" for step in (steps or [])) or f"· {NAMES[level]} 단계"
     if rules.get("shadow"):
-        return f"🤖 {level}단계({NAMES[level]}) 대상 · 그림자 운영이라 진행하지 않음"
+        return f"해 둘 일(그림자 운영이라 하지 않음):\n{listing}"
     if held:
-        return f"🤖 {level}단계({NAMES[level]}) 대상 · {held}"
-    return f"🤖 {level}단계({NAMES[level]})까지 스레드에서 진행합니다. 끼어들려면 그 스레드에 쓰세요."
+        return f"해 둘 일({held}):\n{listing}\n스레드에 '진행해'라고 쓰면 합니다."
+    return f"해 둡니다. 결과는 이 카드의 스레드에 올라옵니다:\n{listing}"
 
 
 def claim(key: str, level: int, rules: dict | None = None) -> str:
@@ -149,10 +160,17 @@ def claim(key: str, level: int, rules: dict | None = None) -> str:
     return ""
 
 
-def task_line(level: int, key: str, what: str) -> str:
-    """스레드에 남기는 진행 표시. 마지막 줄의 표시로 봇이 알아보고 정해진 지시로 턴을 돌린다."""
-    return (f"🤖 {level}단계({NAMES[level]})를 진행합니다. 끼어들고 싶으면 여기에 이어 쓰세요.\n"
+def task_line(level: int, key: str, what: str, steps: list[str] | None = None) -> str:
+    """스레드에 남기는 진행 표시. 할 일 목록이 Claude 지시가 되고, 마지막 줄의 표시로 봇이 알아본다."""
+    target = {"notice": "공지는", "mail": "메일은"}.get(what, what)
+    listing = "\n".join(f"- {step}" for step in (steps or []))
+    return (f"🤖 이 {target} 여기까지 해 둡니다:\n{listing}\n끝나면 결과를 여기에 올립니다. 이어서 할 일이 있으면 여기에 쓰세요.\n"
             f"{AUTO_TAG}{level} {what} {key}")
+
+
+def steps_from(text: str) -> list[str]:
+    """진행 표시 글에서 할 일 목록을 다시 꺼낸다(봇이 Claude 지시를 만들 때)."""
+    return [line[2:].strip() for line in (text or "").splitlines() if line.startswith("- ")]
 
 
 def parse_tag(text: str) -> tuple[int, str, str] | None:
@@ -161,8 +179,14 @@ def parse_tag(text: str) -> tuple[int, str, str] | None:
     return (int(found.group(1)), found.group(2), found.group(3)) if found else None
 
 
-def task_prompt(level: int, what: str) -> str:
-    return TASKS[level].format(what={"notice": "공지", "mail": "메일"}.get(what, what))
+def task_prompt(level: int, what: str, steps: list[str] | None = None) -> str:
+    """자동 진행 지시. 판정된 범위의 할 일만 한다. 캘린더는 코드가 이미 넣었다."""
+    target = {"notice": "공지를", "mail": "메일을"}.get(what, what)
+    work = [step for step in (steps or plan(level, {"source": what})) if step != CALENDAR_STEP]
+    listing = "\n".join(f"{index}. {step}" for index, step in enumerate(work, start=1))
+    return (f"[자동 진행] 이 스레드의 {target} 보고 아래만 해 둔다. 범위는 규칙표로 이미 정해졌다. 더 하지 않는다.\n{listing}\n"
+            f"- 내 상황은 CURRENT_PROFILE.md와 private_facts.md를 본다. 경험이나 수치를 지어내지 않고, 모르는 것은 [확인 필요]로 둔다.\n"
+            f"- {FILES}\n- 스레드에는 한 일, 남은 빈칸, 파일 이름만 짧게 쓴다. 캘린더는 이미 넣었다. 제출과 발송은 하지 않는다.")
 
 
 def quiet_now(rules: dict | None = None) -> bool:
@@ -172,11 +196,26 @@ def quiet_now(rules: dict | None = None) -> bool:
     return hour >= start or hour < end
 
 
-def start_on_card(discord, channel: str, message_id: str, title: str, level: int, key: str, what: str) -> str | None:
+def start_on_card(discord, channel: str, message_id: str, title: str, level: int, key: str, what: str,
+                  steps: list[str] | None = None) -> str | None:
     """카드에 스레드를 열고(이미 있으면 그 스레드) 진행 표시를 남긴다. 봇이 그 표시를 보고 턴을 돌린다."""
     from .notify import SUPPRESS_EMBEDS, Tier
     message = discord.fetch(channel, message_id)
     thread = (message.get("thread") or {}).get("id") or discord.open_thread(channel, message_id, title)
     if thread:
-        discord.send(thread, {"content": task_line(level, key, what), "flags": SUPPRESS_EMBEDS}, tier=Tier.QUIET)
+        discord.send(thread, {"content": task_line(level, key, what, steps), "flags": SUPPRESS_EMBEDS}, tier=Tier.QUIET)
     return thread
+
+
+def claim_followup(key: str, rules: dict | None = None) -> bool:
+    """후속 정리를 해도 되는지. 하루 상한(followup_limit) 안이면 세고 True."""
+    rules = rules or load_rules()
+    state = load_state()
+    day = store.now().date().isoformat()
+    days = state.setdefault("followups", {})
+    if days.get(day, 0) >= int(rules.get("followup_limit", 5)):
+        return False
+    days[day] = days.get(day, 0) + 1
+    state["followups"] = dict(list(days.items())[-14:])
+    save_state(state)
+    return True

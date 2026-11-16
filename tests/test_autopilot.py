@@ -68,9 +68,16 @@ def test_claim_once_per_topic_with_a_daily_limit_and_shadow_mode(state):
     assert autopilot.claim("notice:4", 1, rules) == "단계 낮음"
     assert autopilot.claim("notice:5", 3, {**rules, "shadow": True}) == "그림자 운영"
     assert "그림자" in autopilot.badge(3, {**rules, "shadow": True})
-    line = autopilot.task_line(3, "notice:1", "notice")
+    steps = autopilot.plan(3, facts(from_others=[{"document": "추천서", "who": "지도교수", "lead_days": 14}]))
+    assert steps[0] == autopilot.CALENDAR_STEP and "부탁 메일 초안 (지도교수: 추천서)" in steps[2] and "지원서" in steps[3]
+    line = autopilot.task_line(3, "notice:1", "notice", steps)
+    assert line.startswith("🤖 이 공지는 여기까지 해 둡니다:") and "끼어" not in line and "이어서 할 일" in line
     assert autopilot.parse_tag(line) == (3, "notice", "notice:1") and autopilot.parse_tag("그냥 글") is None
-    assert "3단계" in autopilot.task_prompt(3, "notice") and "제출과 발송은 하지 않는다" in autopilot.task_prompt(2, "mail")
+    assert autopilot.steps_from(line) == steps
+    prompt = autopilot.task_prompt(3, "notice", steps)
+    assert "공지를 보고" in prompt and autopilot.CALENDAR_STEP not in prompt and "지원서·신청서 양식" in prompt
+    assert "제출과 발송은 하지 않는다" in autopilot.task_prompt(2, "mail")
+    assert autopilot.plan(2, autopilot.mail_facts(mail.Mail(id="p", thread="t", action="회신", relevance="high"), True))[-1] == "이 메일에 보낼 답장 초안"
 
 
 def test_rules_file_overrides_the_defaults(state):
@@ -102,9 +109,11 @@ def test_notice_over_the_bar_gets_a_badge_and_a_task_line_in_its_card_thread(sta
     item = ListItem(42, "scholarship", "", "OO장학금", "", "", "2026-11-16", link="https://www.ajou.ac.kr/42")
     cli.handle(item, SimpleNamespace(detail=lambda item, board: detail), None, fake, TODAY)
     card, task = fake.sent[0], fake.sent[1]
-    assert "3단계(초안)까지" in json.dumps(card[1]["embeds"][0], ensure_ascii=False) and calendar == [42]
+    shown = json.dumps(card[1]["embeds"][0], ensure_ascii=False)
+    assert "지원서·신청서 양식을 내 정보로 채운 초안" in shown and autopilot.CALENDAR_STEP in shown and calendar == [42]
     assert fake.opened == [(card[0], "m1", "OO장학금")]
     assert task[0] == "m1" and task[2] == Tier.QUIET and autopilot.parse_tag(task[1]["content"]) == (3, "notice", "notice:42")
+    assert "- 지원서·신청서 양식을 내 정보로 채운 초안" in task[1]["content"]
     fake = FakeDiscord()  # 같은 공지가 다시 와도 한 번만
     cli.handle(item, SimpleNamespace(detail=lambda item, board: detail), None, fake, TODAY)
     assert len(fake.sent) == 1 and "이미 진행함" in json.dumps(fake.sent[0][1]["embeds"][0], ensure_ascii=False)
@@ -121,7 +130,8 @@ def test_bot_queues_the_task_and_runs_it_outside_quiet_hours(helper, state, monk
     async def converse(thread, message):
         ran.append((thread.id, message.content, message.auto))
     helper.converse = converse
-    own = SimpleNamespace(content=autopilot.task_line(3, "notice:42", "notice"), guild=SimpleNamespace(id=helper.guild_id),
+    steps = autopilot.plan(3, facts())
+    own = SimpleNamespace(content=autopilot.task_line(3, "notice:42", "notice", steps), guild=SimpleNamespace(id=helper.guild_id),
                           channel=SimpleNamespace(id=400))
     helper.queue_autorun(own)
     helper.queue_autorun(own)  # 같은 표시가 두 번 와도 한 번
@@ -130,6 +140,34 @@ def test_bot_queues_the_task_and_runs_it_outside_quiet_hours(helper, state, monk
     assert asyncio.run(helper.run_autorun()) is False and not ran  # 밤에는 아침까지 둔다
     monkeypatch.setattr(store, "now", lambda: datetime(2026, 11, 17, 8, 5, tzinfo=KST))
     assert asyncio.run(helper.run_autorun()) is True
-    assert ran[0][0] == 400 and ran[0][1].startswith("[자동 진행 3단계: 초안]") and ran[0][2] is True
+    assert ran[0][0] == 400 and ran[0][1].startswith("[자동 진행]") and "지원서·신청서 양식" in ran[0][1] and ran[0][2] is True
     assert helper.sessions["400"]["notice"] == 42
     assert asyncio.run(helper.run_autorun()) is False
+
+
+def test_idle_record_queues_a_followup_only_after_the_user_spoke(helper, state, monkeypatch):  # noqa: F811
+    """11/16: '기록했습니다' 대신, 마무리 안 된 일 중 비서가 할 수 있는 것을 후속 정리로 이어 한다."""
+    from ajou_assistant import record
+    from tests.test_lifecycle import add_thread
+    monkeypatch.setattr(bot, "AUTORUN_FILE", state / "autoruns.json")
+    monkeypatch.setattr(bot, "sync_push", lambda *args: None)
+    monkeypatch.setattr(record, "write_record", lambda *args, **kwargs: None)
+    monkeypatch.setattr(record, "apply_events", lambda *args, **kwargs: [])
+    result = {"summary": "", "decisions": [], "facts": [], "events": [], "questions": [],
+              "todos": [{"task": "지원 동기 초안 보완", "due": "", "owner": "assistant"}, {"task": "교수님께 메일", "due": "", "owner": "me"}]}
+    monkeypatch.setattr(record, "extract", lambda *args: (result, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}, "claude-opus-5-5"))
+    helper._api = object()
+    thread = add_thread(helper, 500)
+    folder = state / "outputs" / "threads" / "500"
+    record.log_turn(folder, "나", "지원 동기 같이 보자", datetime(2026, 11, 16, 14, 0, tzinfo=KST))
+    flush = bot.Assistant.flush_thread.__get__(helper)
+    assert asyncio.run(flush("500", thread)) is True
+    [job] = json.loads((state / "autoruns.json").read_text())["queue"]
+    assert job["thread"] == 500 and job["prompt"].startswith("[후속 정리]") and "지원 동기 초안 보완" in job["prompt"]
+    assert not [event for event in helper.events if event[0] == "send"]  # '기록했습니다' 목록을 올리지 않는다
+    record.log_turn(folder, "자동 진행", "[후속 정리] …", datetime(2026, 11, 16, 15, 0, tzinfo=KST))
+    asyncio.run(flush("500", thread))  # 후속 정리 턴만 있었으면 다시 하지 않는다
+    assert len(json.loads((state / "autoruns.json").read_text())["queue"]) == 1
+    record.log_turn(folder, "나", "더 보자", datetime(2026, 11, 16, 16, 0, tzinfo=KST))
+    asyncio.run(flush("500", thread, followup=False))  # 닫을 때는 하지 않는다
+    assert len(json.loads((state / "autoruns.json").read_text())["queue"]) == 1
