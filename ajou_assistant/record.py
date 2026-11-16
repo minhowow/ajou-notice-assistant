@@ -144,10 +144,9 @@ def apply_events(result: dict, thread_key: str, today: date) -> list[str]:
             continue
         status = RSVP.get(event["attending"], "needsAction")
         try:
-            # 사용자가 직접 만든 일정(key 없음)을 먼저 고른다.
-            same = sorted(google_bridge.same_time(google_bridge.list_events(day, day), day, clock), key=lambda row: bool(row.get("key")))
-            if same:
-                target = same[0]
+            # 이미 있는 같은 일정(사용자가 직접 만든 것을 먼저)이면 새로 넣지 않고 참석 응답만 고친다.
+            target = google_bridge.find_same(google_bridge.list_events(day, day), day, clock, event["title"])
+            if target:
                 if google_bridge.version() >= 2 and target.get("status") != status:
                     google_bridge.set_rsvp(target["id"], status)
                     lines.append(f"캘린더 {day} {clock} '{target['title'][:30]}' 참석 응답 → {status}")

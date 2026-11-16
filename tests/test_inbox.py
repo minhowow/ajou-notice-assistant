@@ -284,6 +284,8 @@ def test_school_mail_events_go_to_the_calendar_and_others_are_only_listed(monkey
     from ajou_assistant import google_bridge
     added = []
     monkeypatch.setattr(google_bridge, "configured", lambda: True)
+    existing = []
+    monkeypatch.setattr(google_bridge, "list_events", lambda first, last: existing)
     monkeypatch.setattr(google_bridge, "add_event", lambda key, title, day, clock, notes, minutes=30: added.append(
         (key, title, day, clock, minutes, notes)) or {"event": {"link": "https://calendar.google.com/x"}})
     monkeypatch.setattr(store, "now", lambda: NOW)
@@ -301,6 +303,28 @@ def test_school_mail_events_go_to_the_calendar_and_others_are_only_listed(monkey
     assert "📅" in json.dumps(mail.card(exam, lines), ensure_ascii=False)
     outside = mail.Mail(id="m10", thread="t10", sender="광고 <ad@example.com>", events=[mail.MailEvent(title="세일", date="2026-12-01")])
     assert mail.add_events(outside) == ["12/01 세일 (캘린더에 넣지 않음: 학교 밖 발신)"] and len(added) == 1
+    # 11/16 Purdue: 사용자가 이미 넣어 둔 같은 일정이 있으면 또 넣지 않는다
+    existing.append({"id": "u1", "key": "", "title": "Purdue 학부 석사", "start": "2026-11-17T09:00:00+09:00", "allDay": False})
+    purdue = mail.Mail(id="m11", thread="t11", sender="국제교류팀 <oia@ajou.ac.kr>", events=[mail.MailEvent(
+        title="Purdue 해외석사 연계과정 설명회 (국제교류팀, Zoom)", date="2026-12-17", time="09:00")])
+    existing[0]["start"] = "2026-12-17T09:00:00+09:00"
+    [line] = mail.add_events(purdue)
+    assert "이미 캘린더에 있음 「Purdue 학부 석사」" in line and len(added) == 1
+
+
+def test_same_event_means_shared_words_not_just_the_same_hour():
+    from ajou_assistant import google_bridge
+    def at(title, start, key="", all_day=False):
+        return {"id": title, "key": key, "title": title, "start": start, "allDay": all_day}
+    rows = [at("팔 409 확통", "2026-11-17T09:00:00+09:00"), at("Purdue 학부 석사", "2026-11-17T09:00:00+09:00"),
+            at("[마감] 지원 마감", "2026-11-17", key="notice:1:deadline:2026-11-17", all_day=True)]
+    found = google_bridge.find_same(rows, "2026-11-17", "09:00", "Purdue 해외석사 연계과정 설명회 (국제교류팀, Zoom)")
+    assert found["title"] == "Purdue 학부 석사"  # 같은 시각의 수업은 다른 일정
+    assert google_bridge.find_same(rows[:1], "2026-11-17", "09:00", "AI 특강") is None
+    untitled = [at("", "2026-11-20T17:00:00+09:00")]
+    assert google_bridge.find_same(untitled, "2026-11-20", "17:00", "장학 마감") is not None  # 제목 없는 내 일정
+    assert google_bridge.find_same(rows, "2026-11-17", "", "협성대 지원 마감", key="notice:1:deadline:2026-11-17") is None  # 같은 key는 뺀다
+    assert google_bridge.find_same(rows, "2026-11-18", "09:00", "Purdue 학부 석사") is None  # 다른 날
 
 
 

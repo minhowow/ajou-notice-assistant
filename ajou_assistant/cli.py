@@ -808,12 +808,6 @@ def calendar_dates(analysis: Analysis, today: date) -> list:
     return sorted(chosen, key=lambda deadline: (deadline.date, deadline.time))[:4]
 
 
-def already_in_calendar(day: str, clock: str, existing: list[dict]) -> dict | None:
-    """같은 날 같은 시각에 시작하는 일정이 있으면 그 일정. 사용자가 직접 넣은 일정과 겹치지 않게 한다."""
-    from .google_bridge import same_time
-    return next(iter(same_time(existing, day, clock)), None)
-
-
 def cmd_calendar_dedupe(args) -> int:
     """비서가 넣은 일정이 사용자 일정과 같은 시각에 겹치면 비서 쪽을 지운다. 사용자 일정은 건드리지 않는다."""
     from . import google_bridge
@@ -824,10 +818,11 @@ def cmd_calendar_dedupe(args) -> int:
         start = google_bridge.local_start(row)
         if not row.get("key") or start is None:
             continue
-        owners = [other for other in google_bridge.same_time(rows, *start) if not other.get("key")]
-        if not owners:
+        # 같은 시각이라는 것만으로 지우지 않는다. 제목이 겹치는 사용자 일정이 있을 때만(11/16, google_bridge.find_same).
+        owner = google_bridge.find_same([other for other in rows if not other.get("key")], start[0], start[1], row.get("title", ""))
+        if owner is None:
             continue
-        print(f"중복 {start[0]} {start[1]} '{row['title'][:40]}' (사용자 일정 '{owners[0]['title'][:30]}')")
+        print(f"중복 {start[0]} {start[1]} '{row['title'][:40]}' (사용자 일정 '{owner['title'][:30]}')")
         if not args.dry_run:
             google_bridge.remove_event(row["id"])
             removed += 1
@@ -868,8 +863,9 @@ def calendar_entry(title: str, url: str, deadline, group) -> str:
     key = f"notice:{group}:{deadline.kind}:{deadline.date}"
     minutes = 60 if deadline.kind == "event" else 30
     reminders = google_bridge.EVENT_REMINDERS if deadline.kind == "event" else google_bridge.DEADLINE_REMINDERS
-    same = already_in_calendar(deadline.date, deadline.time, google_bridge.list_events(deadline.date, deadline.date))
-    if same and same.get("key") != key:
+    same = google_bridge.find_same(google_bridge.list_events(deadline.date, deadline.date), deadline.date, deadline.time,
+                                   f"{deadline.label} {title}", key)
+    if same:
         return google_bridge.event_link(same, deadline.date)
     result = google_bridge.add_event(key, f"[{CALENDAR_PREFIX[deadline.kind]}] {deadline.label}"[:80],
                                      deadline.date, deadline.time, f"{title}\n{url}\n\n아주대 비서가 공지에서 넣은 일정입니다.",
@@ -890,7 +886,7 @@ def calendar_links_for(group, analysis: Analysis, today: date) -> dict[str, str]
             print(f"캘린더 확인 실패 {group}: {error}")
             return links
         found = google_bridge.find_event(rows, f"notice:{group}:{deadline.kind}:{deadline.date}") \
-            or already_in_calendar(deadline.date, deadline.time, rows)
+            or google_bridge.find_same(rows, deadline.date, deadline.time, deadline.label)
         if found:
             links[calendar_key(deadline)] = google_bridge.event_link(found, deadline.date)
     return links

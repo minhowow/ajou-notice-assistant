@@ -6,6 +6,7 @@ setup/setup-google.sh가 배포 주소와 비밀값을 env에 넣는다. 캘린�
 from __future__ import annotations
 
 import base64
+import re
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
@@ -81,6 +82,45 @@ def local_start(row: dict) -> tuple[str, str] | None:
 
 def same_time(rows: list[dict], day: str, clock: str) -> list[dict]:
     return [row for row in rows if clock and local_start(row) == (day, clock)]
+
+
+# 제목 비교에서 빼는 흔한 말. 둘 다 '설명회'라고 같은 일정은 아니다.
+COMMON_WORDS = {"안내", "설명회", "특강", "마감", "신청", "일정", "모집", "행사", "공지", "참가", "참여", "접수", "시작",
+                "zoom", "온라인", "오프라인", "업무", "프로그램", "제출", "기한", "event"}
+
+
+def _words(title: str) -> set[str]:
+    return {word for word in re.findall(r"[0-9a-z가-힣]{2,}", (title or "").lower()) if word not in COMMON_WORDS and not word.isdigit()}
+
+
+def overlap(first: str, second: str) -> float:
+    """두 제목이 얼마나 겹치는지(0~1). 한쪽 낱말이 다른 쪽 낱말 안에 들어 있어도 겹친 것으로 센다('석사'와 '해외석사')."""
+    left, right = _words(first), _words(second)
+    if not left or not right:
+        return 0.0
+    hits = sum(1 for word in left if any(word in other or other in word for other in right))
+    return hits / min(len(left), len(right))
+
+
+def find_same(rows: list[dict], day: str, clock: str, title: str, key: str = "") -> dict | None:
+    """이미 캘린더에 있는 같은 일정. 없으면 None. (11/16: 메일이 사용자가 넣어 둔 'Purdue 학부 석사' 옆에 같은 설명회를 또 넣었다.)
+
+    같은 날이고 제목이 절반 넘게 겹치거나, 같은 시각이고 제목이 조금이라도 겹치거나, 같은 시각의 제목 없는 일정이면 같은
+    일정으로 본다. 같은 시각이라도 제목이 전혀 다른 일정(수업 등)은 다른 일정이다. 같은 key(비서가 이미 넣은 그 일정)는 뺀다.
+    """
+    for row in sorted(rows, key=lambda row: bool(row.get("key"))):  # 사용자가 직접 만든 일정을 먼저 본다
+        if key and row.get("key") == key:
+            continue
+        start = local_start(row)
+        same_day = (start or (str(row.get("start", ""))[:10], ""))[0] == day
+        if not same_day:
+            continue
+        score = overlap(title, str(row.get("title", "")))
+        if score >= 0.5:
+            return row
+        if clock and start == (day, clock) and (score > 0 or not _words(str(row.get("title", "")))):
+            return row
+    return None
 
 
 def remove_event(event_id: str) -> dict:

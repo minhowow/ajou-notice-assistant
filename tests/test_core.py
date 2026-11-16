@@ -446,13 +446,13 @@ def test_record_schema_requires_every_field():
         assert set(item["required"]) == set(item["properties"]) and item["additionalProperties"] is False
 
 
-def test_existing_event_at_same_time_is_reused():
-    from ajou_assistant.cli import already_in_calendar
-    rows = [{"start": "2026-11-10T10:00:00.000Z", "allDay": False, "title": "온라인 특강"},
+def test_existing_event_at_same_time_is_reused_only_when_titles_share_words():
+    from ajou_assistant.google_bridge import find_same
+    rows = [{"start": "2026-11-10T10:00:00.000Z", "allDay": False, "title": "온라인 AI 특강"},
             {"start": "2026-11-10", "allDay": True, "title": "종일"}]
-    assert already_in_calendar("2026-11-10", "19:00", rows)["title"] == "온라인 특강"
-    assert already_in_calendar("2026-11-10", "20:00", rows) is None
-    assert already_in_calendar("2026-11-10", "", rows) is None
+    assert find_same(rows, "2026-11-10", "19:00", "AI 특강")["title"] == "온라인 AI 특강"  # UTC로 온 19:00
+    assert find_same(rows, "2026-11-10", "19:00", "확률통계 과제") is None  # 같은 시각, 다른 일
+    assert find_same(rows, "2026-11-10", "20:00", "확률통계") is None
 
 
 def test_local_start_reads_utc_and_kst_alike():

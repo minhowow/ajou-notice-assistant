@@ -268,8 +268,14 @@ def add_events(mail: Mail) -> list[str]:
             continue
         minutes = max(15, _minutes(event.time, event.end)) if event.time and event.end > event.time else 60
         notes = "\n".join(part for part in (mail.subject, mail.sender, f"장소: {event.place}" if event.place else "", mail.url) if part)
+        key = f"mail:{mail.id}:{index}"
         try:
-            result = google_bridge.add_event(f"mail:{mail.id}:{index}", event.title, event.date, event.time, notes, minutes=minutes)
+            same = google_bridge.find_same(google_bridge.list_events(event.date, event.date), event.date, event.time, event.title, key)
+            if same:  # 사용자가 이미 넣어 둔 일정이면 또 넣지 않고 그 일정을 가리킨다(11/16 Purdue 설명회 중복)
+                link = google_bridge.event_link(same, event.date)
+                lines.append(f"✅ {_when(event)} {event.title} · 이미 캘린더에 있음 「{str(same.get('title', ''))[:30]}」" + (f" [열기](<{link}>)" if link else ""))
+                continue
+            result = google_bridge.add_event(key, event.title, event.date, event.time, notes, minutes=minutes)
         except Exception as error:  # 캘린더가 안 돼도 알림은 간다
             print(f"메일 일정 넣기 실패 {mail.id}: {type(error).__name__}: {str(error)[:150]}")
             lines.append(f"{_when(event)} {event.title} (캘린더에 넣지 못함)")
