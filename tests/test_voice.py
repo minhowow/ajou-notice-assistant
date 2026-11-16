@@ -56,6 +56,8 @@ def test_dave_layer_is_decrypted_for_the_owner(tmp_path):
     calls = []
 
     class Dave:
+        ready = True
+
         def decrypt(self, user, media, data):
             calls.append((user, data))
             if data == b"bad":
@@ -93,3 +95,60 @@ def test_ogg_pages_have_valid_checksums_and_large_packets_span_segments(tmp_path
         offset, pages = offset + size, pages + 1
     assert pages >= 5 and data.rfind(b"OggS") >= 0
     assert list(OggStream(open(tmp_path / "b.ogg", "rb")).iter_packets())[2:] == [big] * 120
+
+
+def test_packets_wait_for_keys_instead_of_saving_ciphertext(tmp_path):
+    class Dave:
+        ready = False
+
+        def can_passthrough(self, user):
+            return False
+    rec = recorder(tmp_path, Dave())
+    rec.on_packet(packet(1, 0, b"enc"))
+    rec.close()
+    assert rec.waiting == 1 and rec.packets == 0 and "열쇠를 기다린 패킷 1개" in voice.describe(rec)
+
+
+def test_websocket_prepares_and_executes_dave_transitions():
+    """discord.py 2.7은 키 전환을 davey에 알리지 않는다(11/16 패킷 112개를 풀지 못한 원인). 웹소켓이 대신 알린다."""
+    import asyncio
+    calls = []
+
+    class Session:
+        protocol_version = 1
+
+        def process_welcome(self, data):
+            calls.append(("welcome", data))
+
+        def process_commit(self, data):
+            calls.append(("commit", data))
+            return True
+
+        def prepare_transition(self, transition, version):
+            calls.append(("prepare", transition, version))
+
+        def execute_transition(self, transition):
+            calls.append(("execute", transition))
+
+    async def executed(transition):
+        calls.append(("discord-execute", transition))
+    state = SimpleNamespace(dave_session=Session(), dave_protocol_version=1, dave_pending_transitions={},
+                            _execute_transition=executed)
+    ws = voice.TransitionVoiceWebSocket.__new__(voice.TransitionVoiceWebSocket)
+    ws._connection, ws.seq_ack = state, 0
+
+    async def ready(transition):
+        calls.append(("ready", transition))
+
+    async def hook(*args):
+        return None
+    ws.send_transition_ready, ws._hook = ready, hook
+    welcome = struct.pack(">HBH", 1, ws.MLS_WELCOME, 7) + b"W"
+    asyncio.run(ws.received_binary_message(welcome))
+    assert calls == [("welcome", b"W"), ("ready", 7), ("prepare", 7, 1)]
+    calls.clear()
+    asyncio.run(ws.received_message({"op": ws.DAVE_EXECUTE_TRANSITION, "d": {"transition_id": 7}}))
+    assert calls == [("discord-execute", 7), ("execute", 7)]
+    calls.clear()
+    asyncio.run(ws.received_message({"op": ws.DAVE_PREPARE_TRANSITION, "d": {"transition_id": 0, "protocol_version": 1}}))
+    assert ("prepare", 0, 1) in calls and ("execute", 0) not in calls

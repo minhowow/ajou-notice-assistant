@@ -277,3 +277,27 @@ def test_deleting_a_throw_removes_what_it_made(helper, tmp_path, monkeypatch):  
     asyncio.run(helper.on_raw_message_delete(SimpleNamespace(channel_id=10, message_id=1)))
     asyncio.run(helper.on_raw_message_delete(SimpleNamespace(channel_id=50, message_id=12345)))
     assert log == []
+
+
+def test_school_mail_events_go_to_the_calendar_and_others_are_only_listed(monkeypatch):
+    """11/16: 기말고사 공지 메일이 오면 일정이 바로 들어가면 좋겠다. 학교 밖 발신은 적기만 한다."""
+    from ajou_assistant import google_bridge
+    added = []
+    monkeypatch.setattr(google_bridge, "configured", lambda: True)
+    monkeypatch.setattr(google_bridge, "add_event", lambda key, title, day, clock, notes, minutes=30: added.append(
+        (key, title, day, clock, minutes, notes)) or {"event": {"link": "https://calendar.google.com/x"}})
+    monkeypatch.setattr(store, "now", lambda: NOW)
+    rows = mail.parse(json.dumps([{
+        "id": "m9", "thread": "t9", "from": ".이환용 <do-not-reply@blackboard.com>", "subject": "기말고사 일정",
+        "importance": "normal", "kind": "수업", "summary": "12/18 기말",
+        "events": [{"title": "오픈소스SW입문 기말고사", "date": "2026-12-18", "time": "13:30", "end": "14:45", "place": "원천관 대강당"},
+                   {"title": "지난 일", "date": "2026-11-01"}, {"title": "모양이 틀림", "date": "12월 18일"}]}]))
+    [exam] = rows
+    assert [event.title for event in exam.events] == ["오픈소스SW입문 기말고사", "지난 일"]  # 날짜 모양이 틀린 것은 버린다
+    lines = mail.add_events(exam)
+    assert added == [("mail:m9:0", "오픈소스SW입문 기말고사", "2026-12-18", "13:30", 75,
+                      "기말고사 일정\n.이환용 <do-not-reply@blackboard.com>\n장소: 원천관 대강당")]
+    assert lines[0].startswith("✅ 12/18 13:30~14:45 오픈소스SW입문 기말고사 · 원천관 대강당")
+    assert "📅" in json.dumps(mail.card(exam, lines), ensure_ascii=False)
+    outside = mail.Mail(id="m10", thread="t10", sender="광고 <ad@example.com>", events=[mail.MailEvent(title="세일", date="2026-12-01")])
+    assert mail.add_events(outside) == ["12/01 세일 (캘린더에 넣지 않음: 학교 밖 발신)"] and len(added) == 1

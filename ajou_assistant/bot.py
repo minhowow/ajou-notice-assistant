@@ -26,7 +26,8 @@ log.md를 읽게 한다.
 - `#💬대화`, `#📖공부`: 쓰면 스레드가 열린다. 90초 안에 이어 쓴 메시지는 같은 스레드로 간다.
 - `#📚영어`: 붙여 넣은 단어 글을 정리하고 아침·밤에 복습 문제를 낸다(english.py).
 - `#📌핀`: 어느 채널에서든 핀한 메시지가 모인다. 핀을 풀면 빠진다.
-- 음성 채널: 소유자가 들어가면 봇이 따라 들어가 녹음하고, 나가면 멈추고 그 채널 채팅에 파일을 올린다(voice.py).
+- 음성 채널: 소유자가 들어가면 봇이 따라 들어가 녹음하고, 나가면 멈추고 `#🎙녹음`에 파일을 올린다(voice.py). 녹음하는 동안
+  걸쳐 있던 일정을 함께 적고, 그 일정의 스레드가 있으면 거기에 링크 한 줄을 남긴다.
 - `#📥던지기`: 아무거나 던지면 길잡이(router.py)가 맞는 주제의 스레드로 보내 거기서 이어 간다. 애매하면 후보를
   버튼으로 묻는다. 90초 안에 이어 던진 것은 같은 곳으로 간다.
 - 메일(mail.py)과 재공지는 주제 스레드에 한 줄로 붙는다. 봇은 AI를 부르지 않고 쌓아 두었다가 다음 턴 자료로 넘긴다.
@@ -492,6 +493,7 @@ class Assistant(discord.Client):
         self.english_channel = int(channels.get("english", 0))
         self.pins_channel = int(channels.get("pins", 0))
         self.inbox_channel = int(channels.get("inbox", 0))
+        self.recordings_channel = int(channels.get("recordings", 0))
         self.managed = {int(value) for value in channels.values()}
         self.sessions = load_sessions()
         self.locks: dict[int, asyncio.Lock] = {}
@@ -572,12 +574,27 @@ class Assistant(discord.Client):
         recorder = voice.Recorder(path, self.owner_id, client._connection)
         client.recorder = recorder
         client._connection.add_socket_listener(recorder.on_packet)
-        self.recording = {"client": client, "recorder": recorder, "channel": channel}
+        self.recording = {"client": client, "recorder": recorder, "channel": channel, "started": store.now()}
         print(f"녹음 시작 {path.name}", flush=True)
         try:
-            await channel.send(f"🎙 녹음 시작 · 나가면 멈추고 여기에 파일을 올립니다 (`{path.name}`)", **quiet(silent=True))
+            await self.recording_target(channel).send(f"🎙 녹음 시작 · {channel.mention} · 나가면 멈추고 여기에 파일을 올립니다", **quiet(silent=True))
         except discord.HTTPException:
             pass
+
+    def recording_target(self, channel):
+        """녹음 안내를 올릴 곳: #🎙녹음, 없으면 그 음성 채널의 채팅."""
+        return self.get_channel(self.recordings_channel) or channel
+
+    async def recording_events(self, start, end) -> list[dict]:
+        from . import google_bridge
+        if not google_bridge.configured():
+            return []
+        try:
+            rows = await asyncio.to_thread(google_bridge.list_events, start.date().isoformat(), end.date().isoformat())
+        except Exception as error:
+            print(f"녹음 일정 확인 실패: {type(error).__name__}: {str(error)[:120]}", flush=True)
+            return []
+        return voice.overlapping(rows, start, end)
 
     async def stop_recording(self) -> None:
         current, self.recording = self.recording, None
@@ -595,18 +612,37 @@ class Assistant(discord.Client):
             print(traceback.format_exc(), flush=True)
         path = recorder.writer.path
         summary = voice.describe(recorder)
-        print(f"녹음 끝 {path.name}: {summary}", flush=True)
-        if recorder.packets == 0:
+        print(f"녹음 끝 {path.name}: {summary}" + (f" · 첫 오류 {recorder.first_error}" if recorder.first_error else ""), flush=True)
+        target = self.recording_target(channel)
+        if recorder.packets == 0 or recorder.writer.seconds < 1:
             path.unlink(missing_ok=True)
-            text = "🎙 녹음 끝 · 들어온 소리가 없어 파일을 남기지 않았습니다." + (f" (풀지 못한 패킷 {recorder.failures}개)" if recorder.failures else "")
-        else:
-            key = await asyncio.to_thread(voice.upload, path)
-            text = f"🎙 녹음 끝 · {summary}\n서버: `voice/{path.name}`" + (" · S3 백업 완료" if key else "")
+            text = f"🎙 녹음 끝 · 저장할 소리가 없어 파일을 남기지 않았습니다 ({summary})"
+            try:
+                await target.send(text, **quiet(silent=True))
+            except discord.HTTPException:
+                pass
+            return
+        events = await self.recording_events(current["started"], store.now())
+        key = await asyncio.to_thread(voice.upload, path)
+        about = " · ".join(f"📅 {row.get('title', '일정')}" for row in events[:2])
+        text = (f"🎙 녹음 끝 · {channel.mention} · {summary}" + (f"\n{about} 중에 녹음" if about else "")
+                + f"\n서버: `voice/{path.name}`" + (" · S3 백업 완료" if key else ""))
         try:
-            small = recorder.packets and path.stat().st_size <= voice.UPLOAD_LIMIT
-            await channel.send(text, file=discord.File(path) if small else None, **quiet(silent=True))
+            small = path.stat().st_size <= voice.UPLOAD_LIMIT
+            posted = await target.send(text, file=discord.File(path) if small else None, **quiet(silent=True))
         except (discord.HTTPException, OSError):
             print(traceback.format_exc(), flush=True)
+            return
+        # 그 일정의 스레드가 이미 있으면 녹음 링크를 한 줄 남긴다(던지기로 일정 스레드가 생긴 경우).
+        for row in events:
+            thread_key = next((key for key, state in self.sessions.items()
+                               if str((state.get("event") or {}).get("id")) == str(row.get("id"))), None)
+            thread = await self.thread_by_id(int(thread_key)) if thread_key else None
+            if thread is not None:
+                try:
+                    await thread.send(f"🎙 이 일정 녹음: {posted.jump_url} ({summary.split(' · ')[0]})", **quiet(silent=True))
+                except discord.HTTPException:
+                    pass
 
     async def on_error(self, event_method: str, /, *args, **kwargs) -> None:
         print(f"이벤트 처리 실패 {event_method}\n{traceback.format_exc()}", flush=True)

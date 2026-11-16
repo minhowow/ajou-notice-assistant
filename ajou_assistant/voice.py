@@ -9,6 +9,9 @@ discord.py(2.7)는 음성을 보내기만 하고 받지 않는다. 받는 확장
 1. discord.py의 음성 UDP 소켓에 듣기 함수를 붙인다(`VoiceConnectionState.add_socket_listener`).
 2. 전송 암호화(aead_xchacha20_poly1305_rtpsize)를 푼다. discord.py가 보낼 때 쓰는 방식의 반대다.
 3. DAVE가 켜져 있으면 davey로 소유자 몫을 푼다. 음성 웹소켓의 말하기 신호(op 5)로 SSRC와 사용자를 잇는다.
+   discord.py 2.7은 DAVE 키 전환(prepare_transition·execute_transition)을 부르지 않는다. 보내기만 하는 봇은 그래도
+   되지만, 남의 목소리를 풀 열쇠는 전환을 준비할 때 생긴다(davey docs/USAGE.md). 11/16 첫 시험에서 패킷 112개를
+   풀지 못한 원인이다. 그래서 음성 웹소켓을 이어받아 커밋·웰컴(op 29·30)과 전환 준비·실행(op 21·22) 뒤에 부른다.
 4. Opus 패킷을 다시 압축하지 않고 Ogg Opus 파일에 그대로 넣는다. 말이 없는 동안 Discord는 패킷을 보내지 않으므로
    빈 시간은 무음 프레임으로 채워 실제 시간과 길이를 맞춘다.
 
@@ -26,7 +29,9 @@ from pathlib import Path
 import discord
 import nacl.exceptions
 import nacl.secret
-from discord.voice_state import VoiceConnectionState
+from discord.gateway import DiscordVoiceWebSocket
+from discord.utils import MISSING
+from discord.voice_state import ConnectionFlowState, VoiceConnectionState
 
 from .config import STATE_DIR
 
@@ -145,7 +150,8 @@ class Recorder:
         self.users: dict[int, int] = {}  # SSRC → 사용자
         self.lock = threading.Lock()
         self.last: int | None = None
-        self.packets = self.failures = 0
+        self.packets = self.failures = self.waiting = 0
+        self.first_error = ""
         self.started = datetime.now()
 
     def on_ws(self, message: dict) -> None:
@@ -166,14 +172,19 @@ class Recorder:
         if user != self.owner_id:
             return
         dave = self.state.dave_session
-        if dave is not None and self.state.dave_protocol_version > 0 and opus != SILENCE:
+        if dave is not None and opus != SILENCE:
             import davey
-            try:
-                opus = dave.decrypt(user, davey.MediaType.audio, opus)
-            except Exception:
-                if not dave.can_passthrough(user):
+            encrypted = self.state.dave_protocol_version > 0
+            if dave.ready and (encrypted or dave.can_passthrough(user)):
+                try:
+                    opus = dave.decrypt(user, davey.MediaType.audio, opus)
+                except Exception as error:
                     self.failures += 1
+                    self.first_error = self.first_error or f"{type(error).__name__}: {str(error)[:160]}"
                     return
+            elif encrypted:  # 아직 열쇠가 없다(전환 전). 암호문을 파일에 넣지 않는다.
+                self.waiting += 1
+                return
         self.append(timestamp, opus)
 
     def append(self, timestamp: int, opus: bytes) -> None:
@@ -195,13 +206,52 @@ class Recorder:
             self.writer.close()
 
 
+class TransitionVoiceWebSocket(DiscordVoiceWebSocket):
+    """DAVE 키 전환을 davey에 알리는 음성 웹소켓. discord.py가 하는 일을 먼저 하고 그 뒤에 덧붙인다."""
+
+    async def received_message(self, msg) -> None:
+        await super().received_message(msg)
+        session = self._connection.dave_session
+        op, data = msg.get("op"), msg.get("d") or {}
+        if session is None or op not in (self.DAVE_PREPARE_TRANSITION, self.DAVE_EXECUTE_TRANSITION):
+            return
+        try:
+            if op == self.DAVE_PREPARE_TRANSITION:
+                session.prepare_transition(int(data["transition_id"]), int(data["protocol_version"]))
+            elif int(data["transition_id"]) != 0:  # 0번은 prepare_transition이 바로 실행한다
+                session.execute_transition(int(data["transition_id"]))
+        except Exception as error:
+            print(f"DAVE 전환 실패 op {op}: {type(error).__name__}: {str(error)[:150]}", flush=True)
+
+    async def received_binary_message(self, msg: bytes) -> None:
+        await super().received_binary_message(msg)
+        session = self._connection.dave_session
+        if session is None or len(msg) < 5 or msg[2] not in (self.MLS_ANNOUNCE_COMMIT_TRANSITION, self.MLS_WELCOME):
+            return
+        transition = struct.unpack_from(">H", msg, 3)[0]
+        try:
+            session.prepare_transition(transition, session.protocol_version)
+        except Exception as error:  # 커밋이 무시됐거나 세션을 다시 만든 경우
+            print(f"DAVE 전환 준비 실패 {transition}: {type(error).__name__}: {str(error)[:150]}", flush=True)
+
+
+class RecordingConnectionState(VoiceConnectionState):
+    """음성 웹소켓만 TransitionVoiceWebSocket으로 바꾼다. 나머지는 discord.py 그대로다(2.7.x의 _connect_websocket)."""
+
+    async def _connect_websocket(self, resume: bool) -> DiscordVoiceWebSocket:
+        seq_ack = self.ws.seq_ack if self.ws is not MISSING else -1
+        ws = await TransitionVoiceWebSocket.from_connection_state(self, resume=resume, hook=self.hook, seq_ack=seq_ack)
+        self.state = ConnectionFlowState.websocket_connected
+        return ws
+
+
 class RecordingVoiceClient(discord.VoiceClient):
     """음성 웹소켓 신호를 녹음기에 넘기는 VoiceClient. 말하기 신호(op 5)로 SSRC와 사용자를 잇는다."""
 
     recorder: Recorder | None = None
 
     def create_connection_state(self) -> VoiceConnectionState:
-        return VoiceConnectionState(self, hook=self._forward)
+        return RecordingConnectionState(self, hook=self._forward)
 
     async def _forward(self, ws, message: dict) -> None:
         if self.recorder is not None:
@@ -217,8 +267,25 @@ def describe(recorder: Recorder) -> str:
     seconds = int(recorder.writer.seconds)
     size = recorder.writer.path.stat().st_size if recorder.writer.path.exists() else 0
     length = f"{seconds // 3600}시간 {seconds % 3600 // 60}분" if seconds >= 3600 else f"{seconds // 60}분 {seconds % 60}초"
-    return f"{length} · {size / 1024 / 1024:.1f}MB · 받은 패킷 {recorder.packets}개" + (
-        f" · 풀지 못한 패킷 {recorder.failures}개" if recorder.failures else "")
+    extra = (f" · 풀지 못한 패킷 {recorder.failures}개" if recorder.failures else "") + (
+        f" · 열쇠를 기다린 패킷 {recorder.waiting}개" if recorder.waiting else "")
+    return f"{length} · {size / 1024 / 1024:.1f}MB · 받은 패킷 {recorder.packets}개" + extra
+
+
+def overlapping(events: list[dict], start: datetime, end: datetime) -> list[dict]:
+    """녹음하는 동안 걸쳐 있던 일정(종일 일정 빼고). 녹음이 무엇에 관한 것인지 시간으로 짐작한다."""
+    found = []
+    for row in events:
+        if row.get("allDay"):
+            continue
+        try:
+            first = datetime.fromisoformat(str(row.get("start")).replace("Z", "+00:00"))
+            last = datetime.fromisoformat(str(row.get("end")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if first <= end and last >= start:
+            found.append(row)
+    return found
 
 
 def upload(path: Path) -> str | None:
