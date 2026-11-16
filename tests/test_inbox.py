@@ -326,6 +326,11 @@ def test_same_event_means_shared_words_not_just_the_same_hour():
     assert google_bridge.find_same(untitled, "2026-11-20", "17:00", "장학 마감") is not None  # 제목 없는 내 일정
     assert google_bridge.find_same(rows, "2026-11-17", "", "협성대 지원 마감", key="notice:1:deadline:2026-11-17") is None  # 같은 key는 뺀다
     assert google_bridge.find_same(rows, "2026-11-18", "09:00", "Purdue 학부 석사") is None  # 다른 날
+    # 11/16 첫 기준이 같다고 본 두 쌍: 같은 행사의 다른 순서, 낱말 하나만 같은 일정
+    festival = [at("[AI·SW페스티벌] 시상식·럭키드로우 (16:00~17:00)", "2026-11-17T16:00:00+09:00")]
+    assert google_bridge.find_same(festival, "2026-11-17", "09:00", "[AI·SW페스티벌] 부스 운영 (09:00 준비, 10:00~16:00)") is None
+    nubi = [at("누비파티 준비", "2026-11-20T23:00:00+09:00")]
+    assert google_bridge.find_same(nubi, "2026-11-20", "23:00", "[누비 FC 후보] 풋살") is None
 
 
 

@@ -93,32 +93,33 @@ def _words(title: str) -> set[str]:
     return {word for word in re.findall(r"[0-9a-z가-힣]{2,}", (title or "").lower()) if word not in COMMON_WORDS and not word.isdigit()}
 
 
-def overlap(first: str, second: str) -> float:
-    """두 제목이 얼마나 겹치는지(0~1). 한쪽 낱말이 다른 쪽 낱말 안에 들어 있어도 겹친 것으로 센다('석사'와 '해외석사')."""
+def shared(first: str, second: str) -> tuple[int, int, int]:
+    """(겹친 낱말 수, 앞 제목 낱말 수, 뒤 제목 낱말 수). 한쪽 낱말이 다른 쪽 낱말 안에 들어 있어도 센다('석사'와 '해외석사')."""
     left, right = _words(first), _words(second)
-    if not left or not right:
-        return 0.0
     hits = sum(1 for word in left if any(word in other or other in word for other in right))
-    return hits / min(len(left), len(right))
+    return hits, len(left), len(right)
 
 
 def find_same(rows: list[dict], day: str, clock: str, title: str, key: str = "") -> dict | None:
     """이미 캘린더에 있는 같은 일정. 없으면 None. (11/16: 메일이 사용자가 넣어 둔 'Purdue 학부 석사' 옆에 같은 설명회를 또 넣었다.)
 
-    같은 날이고 제목이 절반 넘게 겹치거나, 같은 시각이고 제목이 조금이라도 겹치거나, 같은 시각의 제목 없는 일정이면 같은
-    일정으로 본다. 같은 시각이라도 제목이 전혀 다른 일정(수업 등)은 다른 일정이다. 같은 key(비서가 이미 넣은 그 일정)는 뺀다.
+    - 같은 시각: 제목 없는 일정이거나, 겹친 낱말이 2개 이상이거나, 짧은 쪽 제목의 2/3 이상이 겹치면 같은 일정이다.
+      같은 시각의 수업처럼 제목이 다른 일정은 다른 일정이다.
+    - 같은 날 다른 시각·종일: 긴 쪽 제목의 60% 이상이 겹쳐야 같은 일정이다. 같은 행사의 다른 순서(부스 운영과 시상식)나
+      낱말 하나만 같은 일정(누비 풋살과 누비파티 준비)은 다르다(11/16 첫 기준이 이 둘을 같다고 봤다).
+    같은 key(비서가 이미 넣은 그 일정)는 뺀다. 사용자가 직접 만든 일정을 먼저 본다.
     """
-    for row in sorted(rows, key=lambda row: bool(row.get("key"))):  # 사용자가 직접 만든 일정을 먼저 본다
+    for row in sorted(rows, key=lambda row: bool(row.get("key"))):
         if key and row.get("key") == key:
             continue
         start = local_start(row)
-        same_day = (start or (str(row.get("start", ""))[:10], ""))[0] == day
-        if not same_day:
+        if (start or (str(row.get("start", ""))[:10], ""))[0] != day:
             continue
-        score = overlap(title, str(row.get("title", "")))
-        if score >= 0.5:
-            return row
-        if clock and start == (day, clock) and (score > 0 or not _words(str(row.get("title", "")))):
+        hits, mine, theirs = shared(title, str(row.get("title", "")))
+        if clock and start == (day, clock):
+            if theirs == 0 or hits >= 2 or (hits and hits / max(1, min(mine, theirs)) >= 0.67):
+                return row
+        elif hits and hits / max(mine, theirs) >= 0.6:
             return row
     return None
 
