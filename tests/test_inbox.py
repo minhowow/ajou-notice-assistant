@@ -304,7 +304,8 @@ def test_school_mail_events_go_to_the_calendar_and_others_are_only_listed(monkey
     outside = mail.Mail(id="m10", thread="t10", sender="광고 <ad@example.com>", events=[mail.MailEvent(title="세일", date="2026-12-01")])
     assert mail.add_events(outside) == ["12/01 세일 (캘린더에 넣지 않음: 학교 밖 발신)"] and len(added) == 1
     # 11/16 Purdue: 사용자가 이미 넣어 둔 같은 일정이 있으면 또 넣지 않는다
-    existing.append({"id": "u1", "key": "", "title": "Purdue 학부 석사", "start": "2026-11-17T09:00:00+09:00", "allDay": False})
+    existing.append({"id": "u1", "key": "", "title": "Purdue 학부 석사", "start": "2026-11-17T09:00:00+09:00", "allDay": False,
+                     "link": "https://www.google.com/calendar/event?eid=u1"})
     purdue = mail.Mail(id="m11", thread="t11", sender="국제교류팀 <oia@ajou.ac.kr>", events=[mail.MailEvent(
         title="Purdue 해외석사 연계과정 설명회 (국제교류팀, Zoom)", date="2026-12-17", time="09:00")])
     existing[0]["start"] = "2026-12-17T09:00:00+09:00"

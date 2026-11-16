@@ -12,7 +12,7 @@ from functools import lru_cache
 
 import httpx
 
-from .config import load_secrets
+from .config import SetupError, load_secrets
 
 KST = timezone(timedelta(hours=9))
 DEADLINE_REMINDERS = [60, 1440, 4320]  # 1시간·하루·사흘 전
@@ -141,7 +141,7 @@ def event_link(row: dict, day: str = "") -> str:
         try:
             raw = f"{str(row['id']).split('@')[0]} {calendar_id()}".encode()
             return "https://www.google.com/calendar/event?eid=" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
-        except (BridgeError, httpx.HTTPError, KeyError):
+        except (BridgeError, httpx.HTTPError, KeyError, SetupError):  # 연결 설정이 없어도 날짜 화면으로는 보낸다
             pass
     return day_link(day) if day else ""
 
