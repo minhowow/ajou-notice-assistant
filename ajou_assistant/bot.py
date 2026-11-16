@@ -26,6 +26,7 @@ log.md를 읽게 한다.
 - `#💬대화`, `#📖공부`: 쓰면 스레드가 열린다. 90초 안에 이어 쓴 메시지는 같은 스레드로 간다.
 - `#📚영어`: 붙여 넣은 단어 글을 정리하고 아침·밤에 복습 문제를 낸다(english.py).
 - `#📌핀`: 어느 채널에서든 핀한 메시지가 모인다. 핀을 풀면 빠진다.
+- 음성 채널: 소유자가 들어가면 봇이 따라 들어가 녹음하고, 나가면 멈추고 그 채널 채팅에 파일을 올린다(voice.py).
 - `#📥던지기`: 아무거나 던지면 길잡이(router.py)가 맞는 주제의 스레드로 보내 거기서 이어 간다. 애매하면 후보를
   버튼으로 묻는다. 90초 안에 이어 던진 것은 같은 곳으로 간다.
 - 메일(mail.py)과 재공지는 주제 스레드에 한 줄로 붙는다. 봇은 AI를 부르지 않고 쌓아 두었다가 다음 턴 자료로 넘긴다.
@@ -52,7 +53,7 @@ from pathlib import Path
 import anthropic
 import discord
 
-from . import english, guard, mail, materials, progress, record, repost, router, store
+from . import english, guard, mail, materials, progress, record, repost, router, store, voice
 from .config import (
     ACTIONS_FILE, HOME_DIR, MODEL, PROMPT_FILE, SESSIONS_FILE, STATE_DIR, THREAD_DIR, SetupError, load_discord, load_secrets,
     setting, user_name,
@@ -480,6 +481,7 @@ class Assistant(discord.Client):
         intents.guilds = True
         intents.guild_messages = True
         intents.message_content = True
+        intents.voice_states = True  # 소유자가 음성 채널에 들어오고 나가는 것(녹음, voice.py)
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
         config = load_discord()
         self.guild_id = int(config["guild_id"])
@@ -501,6 +503,8 @@ class Assistant(discord.Client):
         self.pin_lock = asyncio.Lock()
         self.english_lock = asyncio.Lock()
         self._api: anthropic.Anthropic | None = None
+        self.recording: dict | None = None
+        self.voice_lock = asyncio.Lock()
 
     @property
     def api(self) -> anthropic.Anthropic:
@@ -521,6 +525,7 @@ class Assistant(discord.Client):
 
     async def on_ready(self) -> None:
         print(f"연결됨: {self.user} 서버 {len(self.guilds)}개, 스레드 실행: {'구독' if plan_login() else 'API 키'}", flush=True)
+        await self.resume_recording()
         guild = self.get_guild(self.guild_id)
         if guild is not None and self.pins_channel:  # 꺼져 있던 동안 바뀐 핀을 맞춘다.
             for channel in guild.text_channels:
@@ -529,6 +534,79 @@ class Assistant(discord.Client):
                         await self.sync_pins(channel)
                     except discord.HTTPException:
                         print(f"핀 확인 실패: {channel.name}", flush=True)
+
+    # ── 음성 녹음 (voice.py) ──────────────────────────────────────
+
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        """소유자가 음성 채널에 들어가면 따라 들어가 녹음하고, 나가거나 옮기면 멈춘다."""
+        if member.id != self.owner_id or member.guild.id != self.guild_id or before.channel == after.channel:
+            return
+        async with self.voice_lock:
+            if self.recording is not None:
+                await self.stop_recording()
+            if after.channel is not None:
+                await self.start_recording(after.channel)
+
+    async def resume_recording(self) -> None:
+        """봇이 다시 켜졌을 때 소유자가 이미 음성 채널에 있으면 이어서 녹음한다(새 파일)."""
+        guild = self.get_guild(self.guild_id)
+        if guild is None or self.recording is not None:
+            return
+        for channel in guild.voice_channels:
+            if self.owner_id in channel.voice_states:
+                async with self.voice_lock:
+                    await self.start_recording(channel)
+                return
+
+    async def start_recording(self, channel) -> None:
+        try:
+            client = await channel.connect(cls=voice.RecordingVoiceClient, self_deaf=False, self_mute=True, timeout=30)
+        except Exception as error:
+            print(traceback.format_exc(), flush=True)
+            try:
+                await channel.send(f"🎙 녹음을 시작하지 못했습니다: {str(error)[:200]}", **quiet(silent=True))
+            except discord.HTTPException:
+                pass
+            return
+        path = voice.new_path(channel.name, store.now())
+        recorder = voice.Recorder(path, self.owner_id, client._connection)
+        client.recorder = recorder
+        client._connection.add_socket_listener(recorder.on_packet)
+        self.recording = {"client": client, "recorder": recorder, "channel": channel}
+        print(f"녹음 시작 {path.name}", flush=True)
+        try:
+            await channel.send(f"🎙 녹음 시작 · 나가면 멈추고 여기에 파일을 올립니다 (`{path.name}`)", **quiet(silent=True))
+        except discord.HTTPException:
+            pass
+
+    async def stop_recording(self) -> None:
+        current, self.recording = self.recording, None
+        if current is None:
+            return
+        client, recorder, channel = current["client"], current["recorder"], current["channel"]
+        try:
+            client._connection.remove_socket_listener(recorder.on_packet)
+        except Exception:
+            pass
+        recorder.close()
+        try:
+            await client.disconnect(force=True)
+        except Exception:
+            print(traceback.format_exc(), flush=True)
+        path = recorder.writer.path
+        summary = voice.describe(recorder)
+        print(f"녹음 끝 {path.name}: {summary}", flush=True)
+        if recorder.packets == 0:
+            path.unlink(missing_ok=True)
+            text = "🎙 녹음 끝 · 들어온 소리가 없어 파일을 남기지 않았습니다." + (f" (풀지 못한 패킷 {recorder.failures}개)" if recorder.failures else "")
+        else:
+            key = await asyncio.to_thread(voice.upload, path)
+            text = f"🎙 녹음 끝 · {summary}\n서버: `voice/{path.name}`" + (" · S3 백업 완료" if key else "")
+        try:
+            small = recorder.packets and path.stat().st_size <= voice.UPLOAD_LIMIT
+            await channel.send(text, file=discord.File(path) if small else None, **quiet(silent=True))
+        except (discord.HTTPException, OSError):
+            print(traceback.format_exc(), flush=True)
 
     async def on_error(self, event_method: str, /, *args, **kwargs) -> None:
         print(f"이벤트 처리 실패 {event_method}\n{traceback.format_exc()}", flush=True)

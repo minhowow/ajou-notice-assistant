@@ -34,7 +34,7 @@ KEEP_RUNS = 24 * 31
 WINDOW = timedelta(hours=2)  # 이 안에 Lambda가 본 글을 '같은 시간대'로 친다
 RELEVANT = ("high", "medium")
 BACKUP_PARTS = (".cache/ajou-assistant", ".claude/projects", ".claude/settings.json")
-BACKUP_SKIP = {"locks", ".credentials.json"}
+BACKUP_SKIP = {"locks", ".credentials.json", "voice"}  # 녹음은 끝날 때 한 번 따로 올린다(voice.py)
 
 
 def enabled() -> bool:
