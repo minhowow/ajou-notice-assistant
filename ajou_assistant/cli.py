@@ -410,6 +410,44 @@ def preflight() -> None:
     load_secrets()["ANTHROPIC_API_KEY"]
 
 
+def notice_categories() -> dict[str, str]:
+    """공지 번호 → 분류(Notion 기록의 영역을 고를 때)."""
+    return {str(row["id"]): (row.get("analysis") or {}).get("category", "") for row in store.recent_analysis()}
+
+
+def cmd_notion_setup(args) -> int:
+    """개인 Notion의 '아주대 비서' 페이지 아래 📒 기록·🧭 경험 데이터베이스를 만든다(있으면 그대로)."""
+    from . import notion
+    if not notion.enabled():
+        print("NOTION_TOKEN이 없습니다.")
+        return 1
+    ids = notion.Notion().ensure()
+    print(f"Notion 준비됨: 페이지 {ids['root']}, 기록 {ids['log']}, 경험 {ids['exp']}")
+    return 0
+
+
+def cmd_notion_backfill(args) -> int:
+    """지금까지 git에 쌓인 대화 기록(records/data/*.jsonl)을 📒 기록에 옮긴다. 같은 기록은 한 번만 들어간다."""
+    from . import notion
+    from .record import RECORD_DATA_DIR
+    if not notion.enabled():
+        print("NOTION_TOKEN이 없습니다.")
+        return 1
+    client, categories = notion.Notion(), notice_categories()
+    log = client.ids()["log"]
+    made = updated = 0
+    for path in sorted(RECORD_DATA_DIR.glob("*.jsonl")):
+        for row in store.read_jsonl(path):
+            key, properties, blocks = notion.record_page(row, categories)
+            if args.dry_run:
+                print(f"[dry-run] {row['at'][:16]} {properties['종류']['select'] and properties['종류']['select']['name']} {row.get('title', '')[:50]}")
+                continue
+            _, created = client.upsert(log, key, properties, blocks)
+            made, updated = made + created, updated + (not created)
+    print(f"Notion 기록 새로 {made}, 고침 {updated}")
+    return 0
+
+
 def cmd_mail(args) -> int:
     """학교 메일을 확인해 알아야 할 것만 알린다(mail.py). 시계가 08~23시 15분마다 부른다."""
     from . import mail
@@ -1352,6 +1390,11 @@ def main() -> int:
     check.add_argument("--title", default="")
     check.add_argument("--effort", default="low")
     check.set_defaults(func=cmd_check)
+    setup_notion = commands.add_parser("notion-setup", help="개인 Notion에 📒 기록·🧭 경험 데이터베이스 만들기")
+    setup_notion.set_defaults(func=cmd_notion_setup)
+    backfill_notion = commands.add_parser("notion-backfill", help="지금까지의 대화 기록을 Notion 📒 기록에 옮기기")
+    backfill_notion.add_argument("--dry-run", action="store_true")
+    backfill_notion.set_defaults(func=cmd_notion_backfill)
     mailer = commands.add_parser("mail", help="학교 메일 확인 (Gmail 커넥터, 구독 로그인 필요)")
     mailer.add_argument("--dry-run", action="store_true")
     mailer.set_defaults(func=cmd_mail)
@@ -1362,7 +1405,7 @@ def main() -> int:
     args = parser.parse_args()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     # 시계는 계속 돌며 자식 명령이 잠금을 잡아야 하므로 잠그지 않는다. 백업과 메일은 공지 실행과 상관없이 돈다.
-    if args.func in (cmd_schedule, cloud.backup_main, cmd_mail):
+    if args.func in (cmd_schedule, cloud.backup_main, cmd_mail, cmd_notion_setup, cmd_notion_backfill):
         return args.func(args)
     with (STATE_DIR / "run.lock").open("w") as lock:
         try:

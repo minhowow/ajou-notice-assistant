@@ -57,7 +57,7 @@ from pathlib import Path
 import anthropic
 import discord
 
-from . import autopilot, english, guard, mail, materials, progress, record, repost, router, store, voice
+from . import autopilot, english, guard, mail, materials, notion, progress, record, repost, router, store, voice
 from .config import (
     ACTIONS_FILE, HOME_DIR, MODEL, PROMPT_FILE, SESSIONS_FILE, STATE_DIR, THREAD_DIR, SetupError, load_discord, load_secrets,
     setting, user_name,
@@ -640,6 +640,9 @@ class Assistant(discord.Client):
             return
         events = await self.recording_events(current["started"], store.now())
         key = await asyncio.to_thread(voice.upload, path)
+        title = f"🎙 {events[0].get('title', '녹음')}" if events else f"🎙 {channel.name} 녹음"
+        await asyncio.to_thread(notion.add_entry, f"voice:{path.name}", title, current["started"], "자료·녹음", summary,
+                                f"서버 파일: voice/{path.name}" + (" (S3 백업)" if key else ""), "")
         about = " · ".join(f"📅 {row.get('title', '일정')}" for row in events[:2])
         text = (f"🎙 녹음 끝 · {channel.mention} · {summary}" + (f"\n{about} 중에 녹음" if about else "")
                 + f"\n서버: `voice/{path.name}`" + (" · S3 백업 완료" if key else ""))
@@ -1364,6 +1367,9 @@ class Assistant(discord.Client):
                 return
             state["material"] = str(path.relative_to(HOME_DIR))
             text = f"📎 남겼어요: `{state['material']}`"
+            body = path.read_text(encoding="utf-8")
+            await asyncio.to_thread(notion.add_entry, f"material:{thread_id}", title, store.now(), "자료·녹음",
+                                    "스레드에서 남긴 자료", body, link)
         else:
             removed = await asyncio.to_thread(materials.remove, state.pop("material", ""))
             path = None
@@ -1691,6 +1697,10 @@ class Assistant(discord.Client):
         extra += await asyncio.to_thread(record.apply_events, result, key, now.date())
         source = f"[log.md](../outputs/threads/{key}/{record.LOG_NAME}) · [Discord](https://discord.com/channels/{self.guild_id}/{key})"
         await asyncio.to_thread(record.write_record, result, key, title, source, now, extra)
+        if not record.is_empty(result):  # 개인 Notion 📒 기록에도 (토큰이 있을 때만, 실패해도 계속)
+            from .cli import notice_categories
+            row = {"at": now.isoformat(timespec="seconds"), "thread": key, "title": title, "source": source, **result}
+            await asyncio.to_thread(lambda: notion.add_record(row, notice_categories()))
         state.update(recorded=end, record_failures=0)
         state.pop("failed_size", None)
         save_sessions(self.sessions)
