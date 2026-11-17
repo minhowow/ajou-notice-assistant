@@ -854,7 +854,6 @@ class Assistant(discord.Client):
         if row is None and embed is not None:
             self.sessions[str(thread.id)]["intro"] = card_intro(embed)
             save_sessions(self.sessions)
-        await thread.send("이 카드로 대화를 시작합니다. 원하는 것을 적어 주세요. 예: 답장 초안 만들어 줘", **quiet())
         await interaction.followup.send(thread.mention, ephemeral=True)
 
     async def on_message(self, message: discord.Message) -> None:
