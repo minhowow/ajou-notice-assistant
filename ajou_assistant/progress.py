@@ -71,6 +71,11 @@ def tool_line(name: str, arguments: dict, home: str) -> str:
         query = arguments.get("query") or ""
         return ("🗂 노션 찾기" if "search" in action or "query" in action else "🗂 노션 읽기") + (
             f" '{_clip(query, 40)}'" if query else "")
+    if name.startswith(GMAIL) and name.endswith(("create_draft", "update_draft")):
+        to = ", ".join(arguments.get("to") or [])
+        subject = arguments.get("subject") or ""
+        kind = "답장 초안" if arguments.get("replyToMessageId") else "메일 초안"
+        return f"📧 {kind} 만들기" + (f" → {_clip(to, 40)}" if to else "") + (f" '{_clip(subject, 40)}'" if subject else "")
     if name.startswith(GMAIL):
         query = arguments.get("query") or arguments.get("q") or ""
         return "✉️ 메일 " + ("찾기" if "search" in name or "list" in name else "읽기") + (

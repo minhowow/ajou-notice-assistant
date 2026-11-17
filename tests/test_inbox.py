@@ -153,8 +153,14 @@ def test_mail_failures_alert_once_after_three(tmp_path, monkeypatch):
 def test_guard_lets_only_gmail_reading_through():
     assert guard.verdict("mcp__claude_ai_Gmail__search_threads", {"query": "in:inbox"}, set()) is None
     assert guard.verdict("mcp__claude_ai_Gmail__get_thread", {"threadId": "t"}, set()) is None
-    for name in ("send_message", "create_draft", "forward", "trash_thread", "label_message", "reply"):
+    for name in ("send_message", "forward", "trash_thread", "label_message", "reply"):  # reply는 바로 보낸다
         assert guard.verdict(f"mcp__claude_ai_Gmail__{name}", {}, set()), name
+    # 11/17: 초안은 된다(보내지 않음). 원래 메일에 다는 답장 초안도. 숨은 받는 사람과 첨부는 막는다.
+    draft = {"to": ["prof@ajou.ac.kr"], "subject": "Re: 추천서", "body": "감사합니다", "replyToMessageId": "m1"}
+    assert guard.verdict("mcp__claude_ai_Gmail__create_draft", draft, set()) is None
+    assert guard.verdict("mcp__claude_ai_Gmail__update_draft", {"draftId": "d1", "body": "고침"}, set()) is None
+    assert guard.verdict("mcp__claude_ai_Gmail__create_draft", {**draft, "bcc": ["x@evil.example"]}, set())
+    assert guard.verdict("mcp__claude_ai_Gmail__create_draft", {**draft, "attachments": [{"content": "eA=="}]}, set())
     args, prompt = mail.command(["m1"])
     allowed = args[args.index("--allowedTools") + 1].split()
     assert allowed == mail.READ_TOOLS and "Read" in args[args.index("--disallowedTools") + 1].split() and "m1" in prompt
@@ -344,3 +350,13 @@ def test_mail_relevance_uses_the_profile_and_unrelated_school_mail_is_only_count
     course = mail.Mail(id="b", thread="t3", kind="수업", relevance="none")
     assert mail.quiet(career) and not mail.quiet(personal) and not mail.quiet(course)
     assert mail.Mail(id="x", thread="y", relevance="이상한 값").relevance == "medium"
+
+
+def test_draft_shows_who_and_what_in_the_status_line_and_mail_notes_carry_the_message_id():
+    from ajou_assistant import progress
+    line = progress.tool_line("mcp__claude_ai_Gmail__create_draft",
+                              {"to": ["aiws@ajou.ac.kr"], "subject": "Re: 버디 면접 일정", "replyToMessageId": "m7"}, "/home")
+    assert line == "📧 답장 초안 만들기 → aiws@ajou.ac.kr 'Re: 버디 면접 일정'"
+    text = mail.note(mail.Mail(id="m7", thread="t7", subject="버디 면접", summary="일정 회신 요청"))
+    assert "메일 번호(답장 초안의 replyToMessageId): m7" in text and mail.note_id(text) == "m7"
+    assert "메일 번호 m7" in mail.card(mail.Mail(id="m7", thread="t7"))["embeds"][0]["footer"]["text"]

@@ -69,7 +69,7 @@ def test_claim_once_per_topic_with_a_daily_limit_and_shadow_mode(state):
     assert autopilot.claim("notice:5", 3, {**rules, "shadow": True}) == "그림자 운영"
     assert "그림자" in autopilot.badge(3, {**rules, "shadow": True})
     steps = autopilot.plan(3, facts(from_others=[{"document": "추천서", "who": "지도교수", "lead_days": 14}]))
-    assert steps[0] == autopilot.CALENDAR_STEP and "부탁 메일 초안 (지도교수: 추천서)" in steps[2] and "지원서" in steps[3]
+    assert steps[0] == autopilot.CALENDAR_STEP and "부탁 메일을 Gmail 초안으로 (지도교수: 추천서)" in steps[2] and "지원서" in steps[3]
     line = autopilot.task_line(3, "notice:1", "notice", steps)
     assert line.startswith("🤖 이 공지는 여기까지 해 둡니다:") and "끼어" not in line and "이어서 할 일" in line
     assert autopilot.parse_tag(line) == (3, "notice", "notice:1") and autopilot.parse_tag("그냥 글") is None
@@ -77,7 +77,8 @@ def test_claim_once_per_topic_with_a_daily_limit_and_shadow_mode(state):
     prompt = autopilot.task_prompt(3, "notice", steps)
     assert "공지를 보고" in prompt and autopilot.CALENDAR_STEP not in prompt and "지원서·신청서 양식" in prompt
     assert "제출과 발송은 하지 않는다" in autopilot.task_prompt(2, "mail")
-    assert autopilot.plan(2, autopilot.mail_facts(mail.Mail(id="p", thread="t", action="회신", relevance="high"), True))[-1] == "이 메일에 보낼 답장 초안"
+    assert autopilot.plan(2, autopilot.mail_facts(mail.Mail(id="p", thread="t", action="회신", relevance="high"), True))[-1].startswith("이 메일에 보낼 답장을 Gmail 초안으로")
+    assert "replyToMessageId" in autopilot.task_prompt(2, "mail")
 
 
 def test_rules_file_overrides_the_defaults(state):

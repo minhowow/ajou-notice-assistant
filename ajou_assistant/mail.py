@@ -302,6 +302,7 @@ def note(mail: Mail, calendar: list[str] | None = None, robot: str = "") -> str:
         lines.append(robot)
     if mail.url:
         lines.append(f"<{mail.url}>")
+    lines.append(f"메일 번호(답장 초안의 replyToMessageId): {mail.id}")
     lines.append(f"{MAIL_TAG}{mail.id}")
     return "\n".join(lines)
 
@@ -321,7 +322,7 @@ def card(mail: Mail, calendar: list[str] | None = None, robot: str = "") -> dict
         fields.append({"name": "🤖 자동 진행", "value": _clip(robot, 1000)})
     embed = {"title": _clip(mail.subject or "(제목 없음)", 256), "description": plain_links(_clip(mail.summary, 2000), TRUSTED),
              "color": COLORS.get(mail.importance, COLORS["normal"]), "fields": fields,
-             "footer": {"text": _clip(f"메일 · {mail.date}", 200)}}
+             "footer": {"text": _clip(f"메일 · {mail.date} · 메일 번호 {mail.id}", 200)}}
     if mail.url:
         embed["url"] = mail.url
     key = f"mail-{mail.id}"[:80]
@@ -394,7 +395,7 @@ def deliver(discord: Discord, client, mail: Mail, state: dict, sessions: dict) -
         proceed(discord.open_thread(channel, message_id, mail.subject or "메일"))
     if message_id:
         cards[mail.thread] = {"channel": str(discord.channels.get(channel, channel)), "message": str(message_id),
-                              "subject": mail.subject, "from": mail.sender, "at": store.now().isoformat(timespec="seconds")}
+                              "subject": mail.subject, "from": mail.sender, "mail_id": mail.id, "at": store.now().isoformat(timespec="seconds")}
     return f"카드 #{channel}" + (f" · 일정 {len(calendar)}" if calendar else "")
 
 

@@ -141,6 +141,14 @@ class Discord:
             return
         self.request("PATCH", f"/channels/{self.target(channel)}/messages/{message_id}", {"embeds": embeds})
 
+    def edit_content(self, channel: str, message_id: str, content: str) -> None:
+        """메시지 글만 고친다. 고쳐도 알림은 가지 않는다."""
+        if self.dry_run:
+            print(f"[dry-run #{channel}] 글 고침 {message_id}", content[:300])
+            return
+        self.request("PATCH", f"/channels/{self.target(channel)}/messages/{message_id}",
+                     {"content": content, "allowed_mentions": {"parse": []}})
+
     def open_thread(self, channel: str, message_id: str, name: str) -> str | None:
         """알림 메시지에 스레드를 열고 소유자를 넣는다. 스레드 번호는 알림 메시지 번호와 같다."""
         if self.dry_run:

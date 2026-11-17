@@ -49,7 +49,8 @@ DEFAULT = {
     ],
 }
 CALENDAR_STEP = "일정을 캘린더에 넣음"
-FILES = "결과는 작업 폴더에 남긴다: 체크리스트·부탁 메일·답장 초안은 `준비.md`, 지원서·신청서 초안은 `초안.md`."
+FILES = ("결과는 작업 폴더에 남긴다: 체크리스트는 `준비.md`, 지원서·신청서 초안은 `초안.md`. 메일은 create_draft로 Gmail 초안을 "
+         "만들고(답장이면 replyToMessageId), 받는 사람·제목·초안 링크를 `준비.md`와 스레드에 적는다. 받는 사람 주소를 모르면 비워 두고 [확인 필요]")
 
 
 def load_rules() -> dict:
@@ -76,9 +77,9 @@ def plan(level: int, facts: dict) -> list[str]:
     if level >= 2:
         steps.append("자격·마감을 내 상황과 대조해 정리하고, 마감에서 거꾸로 센 준비물 체크리스트를 만듦")
         if facts.get("asks"):
-            steps.append("남에게 부탁할 서류의 부탁 메일 초안 (" + ", ".join(facts["asks"]) + ")")
+            steps.append("남에게 부탁할 서류의 부탁 메일을 Gmail 초안으로 (" + ", ".join(facts["asks"]) + ")")
         if facts.get("source") == "mail" and facts.get("has_action"):
-            steps.append("이 메일에 보낼 답장 초안")
+            steps.append("이 메일에 보낼 답장을 Gmail 초안으로 (원래 메일 스레드에)")
     if level >= 3:
         steps.append("지원서·신청서 양식을 내 정보로 채운 초안 (모르는 칸은 [확인 필요])")
     return steps

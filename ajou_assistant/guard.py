@@ -10,8 +10,10 @@
   고치기(손님이 고칠 수 있는 남의 일정이면 주최자가 읽는다), 다른 캘린더, 공개 설정, 첨부, 회의 주소가 그렇다.
   도구마다 받을 수 있는 칸을 정해 두고 그 밖의 칸이 오면 막는다. 고치기는 시간·알림·색만 된다.
 - 노션: 읽기만 된다. 팀 노션은 함께 쓰는 공간이라 잘못 고치면 남의 문서가 바뀐다.
-- Gmail: 읽기 도구(search_threads, get_thread)만 지나간다. 메일 확인(mail.py)만 이 둘을 허용 목록에 넣는다.
-  보내기·초안·라벨·삭제·전달은 막는다(11/6 사용자: 메일 발송은 자동 승인하지 않고 코드로 막는다).
+- Gmail: 읽기(search_threads, get_thread)와 초안 만들기·고치기(create_draft, update_draft)만 지나간다. 초안은 보내지
+  않으므로 사용자가 Gmail에서 확인하고 보낸다(11/17 사용자: 답장 초안을 글로만 써 주니 바로 보내기 불편하다). 답장은
+  create_draft의 replyToMessageId로 원래 메일 스레드에 단다. 커넥터의 reply는 바로 보내므로 막는다. 보내기·전달·라벨·
+  삭제도 막는다(11/6 사용자: 메일 발송은 자동 승인하지 않고 코드로 막는다). 초안에 숨은 받는 사람(bcc)과 첨부는 받지 않는다.
 - 그 밖의 커넥터: 막는다.
 - 파일 쓰기: 쓰기는 스레드 폴더 안으로 제한되어 있지만, 그 안에서도 `.git`으로 시작하는 파일(`.gitattributes`로
   그 폴더의 git-crypt 암호화를 끌 수 있다), `.claude` 폴더, `CLAUDE.md`(다음 대화에 지시로 읽힌다), `.mcp.json`은
@@ -32,6 +34,11 @@ CALENDAR = "mcp__claude_ai_Google_Calendar__"
 NOTION = "mcp__claude_ai_Notion__"
 GMAIL = "mcp__claude_ai_Gmail__"
 GMAIL_READ = {"search_threads", "get_thread"}
+GMAIL_DRAFT_KEYS = {
+    "create_draft": {"to", "cc", "subject", "body", "htmlBody", "replyToMessageId", "includeSignature"},
+    "update_draft": {"draftId", "to", "cc", "subject", "body", "htmlBody"},
+    "list_drafts": None, "get_draft": None,
+}
 CALENDAR_READ = {"list_calendars", "list_events", "search_events", "get_event", "suggest_time"}
 # 쓰는 도구는 받을 수 있는 칸을 정해 둔다. 그 밖의 칸(참석자, 첨부, 공개 설정, 회의 주소, 응답 코멘트 등)은 막는다.
 CALENDAR_WRITE_KEYS = {
@@ -60,7 +67,8 @@ RULE_FILES = {"claude.md", "claude.local.md", ".mcp.json"}
 
 def tool_names() -> list[str]:
     """스레드 봇에 허용할 커넥터 도구. 이 목록 밖의 커넥터 도구는 dontAsk 모드에서 거부된다."""
-    return [CALENDAR + name for name in sorted(CALENDAR_ALLOWED)] + [NOTION + name for name in sorted(NOTION_READ)]
+    return ([CALENDAR + name for name in sorted(CALENDAR_ALLOWED)] + [NOTION + name for name in sorted(NOTION_READ)]
+            + [GMAIL + name for name in sorted(GMAIL_READ | set(GMAIL_DRAFT_KEYS))])
 
 
 def people(value, inside: bool = False) -> list[str]:
@@ -137,9 +145,17 @@ def verdict(tool: str, arguments: dict, owners: set[str]) -> str | None:
             return "노션은 읽기만 합니다. 고칠 내용은 사용자에게 초안으로 보여 주세요."
         return None
     if tool.startswith(GMAIL):
-        if tool[len(GMAIL):] in GMAIL_READ:
+        name = tool[len(GMAIL):]
+        if name in GMAIL_READ:
             return None
-        return "메일은 읽기만 합니다. 보내기·초안·라벨·삭제·전달은 하지 않습니다. 필요하면 사용자에게 초안을 보여 주세요."
+        if name in GMAIL_DRAFT_KEYS:
+            allowed = GMAIL_DRAFT_KEYS[name]
+            extra = sorted(key for key in arguments if allowed is not None and key not in allowed)
+            if extra:
+                return "메일 초안에는 이 칸을 쓰지 않습니다: " + ", ".join(extra) + ". 숨은 받는 사람(bcc)과 첨부 없이 다시 만드세요."
+            return None
+        return ("메일은 보내지 않습니다(답장·보내기·전달·삭제·라벨). 대신 create_draft로 초안을 만드세요. 답장이면 "
+                "replyToMessageId에 원래 메일 번호를 넣습니다. 사용자가 Gmail에서 확인하고 보냅니다.")
     if tool.startswith("mcp__"):
         return "이 스레드에서 허용하지 않은 커넥터입니다."
     return None

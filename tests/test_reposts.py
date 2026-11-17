@@ -93,6 +93,7 @@ def test_groups_follow_chains_and_keep_latest_dates_with_highest_relevance(notic
 
 class FakeDiscord:
     dry_run = False
+    channels = {"scholarship": "800", "urgent": "801"}
 
     def __init__(self):
         self.sent = []
@@ -113,6 +114,9 @@ class FakeDiscord:
         return {"embeds": [{"title": "OO장학금", "fields": [{"name": "마감", "value": "11/10"}]}],
                 **({"thread": {"id": self.thread_of}} if self.thread_of else {})}
 
+    def edit_content(self, channel, message_id, content):
+        self.sent.append((channel, {"edit": message_id, "content": content}, None))
+
     def edit_embeds(self, channel, message_id, embeds):
         self.edits = (self.edits or []) + [(channel, message_id, embeds)]
 
@@ -129,8 +133,9 @@ def test_reminders_go_once_per_group_and_stop_when_any_member_is_closed(notices,
     store.add_repost(2, 1, "", "test")
     fake = FakeDiscord()
     assert cli.send_reminders(fake, date(2026, 11, 10)) == 1  # D-3, 두 글이 아니라 한 번
-    assert "ajou:done:1" in json.dumps(fake.sent[0][1]["components"])
-    assert cli.send_reminders(fake, date(2026, 11, 10)) == 0
+    [(channel, payload, tier)] = fake.sent
+    assert channel == "urgent" and tier == Tier.PING and payload["content"].count("OO장학금") == 1 and "D-3" in payload["content"]
+    assert cli.send_reminders(fake, date(2026, 11, 10)) == 0 and len(fake.sent) == 1  # 같은 날 다시 돌아도 새 메시지 없음
     store.mark_item(2, "done")  # 재공지 쪽에서 완료해도 묶음 전체가 멈춘다
     assert cli.send_reminders(fake, date(2026, 11, 12)) == 0
 

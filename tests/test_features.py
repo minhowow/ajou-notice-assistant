@@ -64,7 +64,8 @@ def test_plan_mode_adds_connectors_and_hook_but_not_api_key(monkeypatch):
     plan = bot.claude_command("outputs/threads/1", None, True, "study")
     allowed = plan[plan.index("--allowedTools") + 1]
     assert CAL + "create_event" in allowed and CAL + "delete_event" not in allowed
-    assert "Write(study/**)" in allowed and "Gmail" not in allowed
+    assert "Write(study/**)" in allowed and "Gmail__create_draft" in allowed  # 11/17: 메일은 초안까지
+    assert not any(name in allowed for name in ("Gmail__reply", "Gmail__send_message", "Gmail__forward"))
     hooks = json.loads(plan[plan.index("--settings") + 1])["hooks"]["PreToolUse"]
     assert "guard.py" in hooks[0]["hooks"][0]["command"]
     api = bot.claude_command("outputs/threads/1", None, False, "chat")
@@ -136,27 +137,53 @@ def test_old_analysis_rows_still_load_and_asks_count_back_from_deadline():
     assert "D-2" in format_asks(analysis, date(2026, 10, 28))
 
 
-def test_ask_reminders_fire_once_when_late():
-    from ajou_assistant.cli import send_ask_reminders
-    analysis = Analysis.model_validate({
-        "relevance": "high", "category": "scholarship", "summary": "", "why_relevant": "", "eligibility": "likely",
-        "eligibility_reason": "", "action": "", "unknowns": [],
-        "deadlines": [{"label": "마감", "date": "2026-11-13", "time": "", "kind": "deadline"}],
-        "from_others": [{"document": "추천서", "who": "지도교수", "lead_days": 14}]})
+def test_urgent_reminders_are_one_message_a_day_edited_in_place(monkeypatch, tmp_path):
+    """11/17 사용자: '부탁 시작'이 서류마다·날짜마다 새 메시지로 쌓였다. 하루 한 메시지, 공지마다 한 줄, 새로 걸리면 고친다."""
+    from datetime import datetime as moment
+    from ajou_assistant import cli
+    analysis = {"relevance": "high", "category": "scholarship", "summary": "", "why_relevant": "", "eligibility": "likely",
+                "eligibility_reason": "", "action": "", "unknowns": [],
+                "deadlines": [{"label": "마감", "date": "2026-11-13", "time": "", "kind": "deadline"}],
+                "from_others": [{"document": "추천서", "who": "지도교수", "lead_days": 14},
+                                {"document": "재학증명서", "who": "학사팀", "lead_days": 10}]}
+    def group(number, title):
+        return {"id": number, "root": number, "members": {number}, "title": title, "url": f"https://www.ajou.ac.kr/{number}",
+                "analysis": analysis}
+    groups = [group(1, "[학부] (26.11.05.) 계절학기 국외 수학"), group(2, "[학부] (26.11.12.) 계절학기 국외 수학")]
+    marks = {}
+    monkeypatch.setattr(store, "notice_groups", lambda: groups)
+    monkeypatch.setattr(store, "closed_items", lambda: set())
+    monkeypatch.setattr(store, "tracked_items", lambda: set())
+    monkeypatch.setattr(store, "reminded_on", lambda: dict(marks))
+    monkeypatch.setattr(store, "mark_reminded", lambda key: marks.setdefault(key, "2026-11-03"))
+    monkeypatch.setattr(store, "now", lambda: moment(2026, 11, 3, 10, 0, tzinfo=store.KST))
+    monkeypatch.setattr(cli, "DIGEST_FILE", tmp_path / "digest.json")
+    monkeypatch.setattr(cli, "load_discord", lambda: {"guild_id": "9"})
+    monkeypatch.setattr(cli, "first_alert", lambda members: {"channel": "scholarship", "message_id": f"m{min(members)}"})
 
     class Fake:
-        dry_run = True
-        sent: list = []
+        dry_run = False
+        channels = {"scholarship": "800"}
+
+        def __init__(self):
+            self.sent, self.edits = [], []
 
         def send(self, channel, payload, tier=None):
-            self.sent.append((channel, payload["content"]))
+            self.sent.append((channel, payload["content"], tier))
+            return "d1"
 
+        def edit_content(self, channel, message_id, content):
+            self.edits.append((message_id, content))
     fake = Fake()
-    row = {"id": 1, "title": "장학", "url": "https://example.ac.kr"}
-    seen = {"1:ask:추천서:late"}
-    assert send_ask_reminders(fake, row, analysis, date(2026, 11, 3), seen) == 0
-    assert send_ask_reminders(fake, row, analysis, date(2026, 11, 3), set()) == 1
-    assert "지도교수" in fake.sent[0][1]
+    assert cli.send_reminders(fake, date(2026, 11, 3)) == 4  # 두 공지 × 서류 둘(추천서 늦음, 재학증명서 오늘)
+    [(channel, text, tier)] = fake.sent
+    assert channel == "urgent" and text.startswith("🚨 **오늘 챙길 것** 11/3(화)")
+    assert text.count("계절학기 국외 수학") == 1  # 날짜만 다른 연속 공지는 한 줄
+    assert "추천서: 지도교수께 늦음, 오늘 바로 · 재학증명서: 학사팀께 오늘" in text
+    assert "(<https://discord.com/channels/9/800/m1>)" in text
+    groups.append(group(3, "OO장학"))  # 같은 날 새로 걸린 공지: 새 메시지 대신 고친다
+    assert cli.send_reminders(fake, date(2026, 11, 3)) == 2 and len(fake.sent) == 1 and "OO장학" in fake.edits[-1][1]
+    assert cli.send_reminders(fake, date(2026, 11, 4)) == 0 and len(fake.sent) == 1  # 늦은 부탁은 한 번만
 
 
 def test_weekly_reads_across_month_boundary(tmp_path, monkeypatch):

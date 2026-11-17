@@ -455,49 +455,51 @@ def cmd_seed(args) -> int:
 
 
 ASK_REMINDER_DAYS = (2, 0)
+DIGEST_FILE = STATE_DIR / "urgent_digest.json"
+WEEKDAYS = "월화수목금토일"
 
 
-def send_ask_reminders(discord: Discord, row: dict, analysis: Analysis, today: date, sent: set) -> int:
-    """남에게 부탁할 서류는 '부탁할 날' 이틀 전과 당일에 알린다. 이미 지났으면 한 번만 바로 알린다."""
-    count = 0
-    for prep, ask in ask_dates(analysis, today):
-        left = (ask - today).days
-        if left not in ASK_REMINDER_DAYS and left >= 0:
-            continue
-        key = f"{row['id']}:ask:{prep.document}:{left if left >= 0 else 'late'}"
-        if key in sent or (left < 0 and any(item.startswith(f"{row['id']}:ask:{prep.document}:") for item in sent)):
-            continue
-        when = "이미 늦었습니다. 오늘 바로" if left < 0 else "오늘" if left == 0 else f"{ask.month}/{ask.day}까지"
-        discord.send("urgent", {
-            "content": f"🤝 **부탁 시작** {row['title'][:120]}\n{prep.document}: {prep.who}께 {when} 부탁하세요 "
-                       f"(받기까지 약 {prep.lead_days}일)\n<{row['url']}>",
-        }, tier=Tier.PING)
-        if not discord.dry_run:
-            store.mark_reminded(key)
-            sent.add(key)
-        count += 1
-    return count
+def _series_title(title: str) -> str:
+    """같은 공지가 날짜만 바꿔 여러 번 올라온 것('(26.11.12.) 동계 계절학기 …')을 한 줄로 묶기 위한 제목."""
+    return re.sub(r"\s+", " ", re.sub(r"\(\s*\d{2,4}\.\s*\d{1,2}\.\s*\d{1,2}\.?\s*\)", "", title)).strip()
 
 
-def send_reminders(discord: Discord, today: date) -> int:
-    """관련도 높은 공지의 마감을 D-3, D-1, 당일 아침에 강한 알림으로 다시 알린다. 완료·패스하면 멈춘다."""
-    if not 9 <= store.now().hour < 22:
-        return 0
-    closed = store.closed_items()
-    tracked = store.tracked_items()
-    sent = store.reminded()
-    account = load_discord().get("calendar_account", "")
-    google_ready = calendar_ready()
-    count = 0
-    for group in store.notice_groups():  # 재공지는 처음 공지 번호로 한 번만 독촉한다.
+def reminder_items(today: date) -> list[dict]:
+    """오늘 알릴 마감·부탁. 키마다 처음 걸린 날 하루만 오늘 목록에 든다(그날 안에서는 계속 보인다).
+
+    - 마감: 관련도 높은 공지의 D-3, D-1, 당일.
+    - 부탁: 남에게 받을 서류를 '부탁할 날' 이틀 전과 당일, 이미 늦었으면 한 번.
+    완료·패스한 공지와 자격이 안 되는 공지는 뺀다. 재공지는 처음 공지 번호로 한 번.
+    """
+    closed, tracked, first = store.closed_items(), store.tracked_items(), store.reminded_on()
+    today_text = today.isoformat()
+
+    def fresh(key: str) -> bool:
+        return first.get(key, today_text) == today_text
+    items = []
+    for group in store.notice_groups():
         analysis = Analysis.model_validate(group["analysis"])
         if group["members"] & tracked:  # 사용자가 추적하라고 한 공지는 판단과 상관없이 높음으로 다룬다.
             analysis = analysis.model_copy(update={"relevance": "high", "eligibility": "likely"})
         if group["members"] & closed or analysis.eligibility == "unlikely":
             continue
         row = {**group, "id": group["root"]}
+        base = {"root": row["id"], "members": group["members"], "title": row["title"], "url": row["url"]}
         if analysis.relevance == "high" or (analysis.relevance == "medium" and analysis.eligibility == "likely"):
-            count += send_ask_reminders(discord, row, analysis, today, sent)
+            asks = []
+            for prep, ask in ask_dates(analysis, today):
+                left = (ask - today).days
+                if left not in ASK_REMINDER_DAYS and left >= 0:
+                    continue
+                key = f"{row['id']}:ask:{prep.document}:{left if left >= 0 else 'late'}"
+                if left < 0 and any(old.startswith(f"{row['id']}:ask:{prep.document}:") and day != today_text for old, day in first.items()):
+                    continue  # 늦은 부탁은 한 번만
+                if not fresh(key):
+                    continue
+                when = "늦음, 오늘 바로" if left < 0 else "오늘" if left == 0 else f"{ask.month}/{ask.day}까지"
+                asks.append((key, f"{prep.document}: {prep.who}께 {when}"))
+            if asks:
+                items.append({**base, "kind": "ask", "keys": [key for key, _ in asks], "text": " · ".join(text for _, text in asks), "order": 1})
         if analysis.relevance != "high":
             continue
         for deadline in analysis.deadlines:
@@ -506,19 +508,75 @@ def send_reminders(discord: Discord, today: date) -> int:
             except ValueError:
                 continue
             key = f"{row['id']}:{deadline.date}:{left}"
-            if deadline.kind != "deadline" or left not in REMINDER_DAYS or key in sent:
+            if deadline.kind != "deadline" or left not in REMINDER_DAYS or not fresh(key):
                 continue
             label = "오늘 마감" if left == 0 else f"D-{left}"
-            item = ListItem(row["id"], row["board"], "", row["title"], "", "", row.get("date", ""), link=row["url"])
-            in_calendar = calendar_links_for(group["root"], analysis, today) if google_ready else {}
-            discord.send("urgent", {
-                "content": f"⏰ **{label}** {row['title'][:120]}\n{deadline.label}: {deadline.date} {deadline.time}".strip(),
-                "components": build_components(item, analysis, today, account, in_calendar, can_add=google_ready),
-            }, tier=Tier.PING)
-            if not discord.dry_run:
-                store.mark_reminded(key)
-            count += 1
-    return count
+            items.append({**base, "kind": "deadline", "keys": [key], "order": 0 if left == 0 else 0.5,
+                          "text": f"**{label}** {deadline.label} {deadline.date[5:].replace('-', '/')} {deadline.time}".strip()})
+    return items
+
+
+def digest_text(items: list[dict], today: date, links: dict) -> str:
+    """오늘 챙길 것 한 덩어리. 공지마다 한 줄이고 같은 제목(날짜만 다른 연속 공지)은 한 줄로 묶는다."""
+    lines, seen = [], set()
+    for item in sorted(items, key=lambda item: (item["order"], item["title"])):
+        mark = (item["kind"], _series_title(item["title"]), item["text"])
+        if mark in seen:
+            continue
+        seen.add(mark)
+        icon = "⏰" if item["kind"] == "deadline" else "🤝"
+        link = links.get(item["root"]) or item["url"]
+        lines.append(f"{icon} [{_clip(_series_title(item['title']), 70)}](<{link}>) — {item['text']}")
+    head = f"🚨 **오늘 챙길 것** {today.month}/{today.day}({WEEKDAYS[today.weekday()]}) · 공지 카드에서 완료·패스하면 내일부터 빠집니다"
+    text, kept = head, 0
+    for line in lines:
+        if len(text) + len(line) + 30 > 1990:
+            break
+        text += "\n" + line
+        kept += 1
+    if kept < len(lines):
+        text += f"\n… 외 {len(lines) - kept}건"
+    return text
+
+
+def send_reminders(discord: Discord, today: date) -> int:
+    """마감·부탁 독촉을 하루 한 메시지로 모아 🚨긴급에 올린다(9~22시). 같은 날 새로 걸린 것은 그 메시지를 고친다.
+
+    11/17 사용자: '부탁 시작'이 서류마다, 날짜마다 새 메시지로 계속 아래에 쌓여 중복이 너무 많다. 그래서 공지마다 한 줄,
+    하루 한 메시지로 모은다. 하루의 첫 메시지만 멘션 알림이 가고, 고치기는 알림이 없다. 각 줄은 처음 알림 카드로 이어진다
+    (버튼은 카드에 있다). 돌려주는 값은 새로 걸린 항목 수다.
+    """
+    if not 9 <= store.now().hour < 22:
+        return 0
+    items = reminder_items(today)
+    if not items:
+        return 0
+    first = store.reminded_on()
+    new_keys = [key for item in items for key in item["keys"] if key not in first]
+    guild = load_discord().get("guild_id", "")
+    links = {}
+    for item in items:
+        alert = first_alert(item["members"])
+        channel_id = discord.channels.get(alert["channel"]) if alert else None
+        if alert and channel_id and guild:
+            links[item["root"]] = f"https://discord.com/channels/{guild}/{channel_id}/{alert['message_id']}"
+    text = digest_text(items, today, links)
+    try:
+        state = json.loads(DIGEST_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    if state.get("date") == today.isoformat() and state.get("message_id"):
+        if state.get("text") != text:
+            discord.edit_content("urgent", state["message_id"], text)
+    else:
+        state = {"date": today.isoformat(), "message_id": discord.send("urgent", {"content": text}, tier=Tier.PING)}
+    if not discord.dry_run:
+        state["text"] = text
+        DIGEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        DIGEST_FILE.write_text(json.dumps(state, ensure_ascii=False))
+        for key in new_keys:
+            store.mark_reminded(key)
+    return len(new_keys)
 
 
 def cmd_run(args) -> int:

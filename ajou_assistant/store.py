@@ -150,6 +150,14 @@ def reminded() -> set[str]:
     return {row["key"] for row in read_jsonl(REMINDERS_FILE)}
 
 
+def reminded_on() -> dict[str, str]:
+    """독촉 키마다 처음 알린 날짜(YYYY-MM-DD)."""
+    found: dict[str, str] = {}
+    for row in read_jsonl(REMINDERS_FILE):
+        found.setdefault(row["key"], str(row.get("at", ""))[:10])
+    return found
+
+
 def mark_reminded(key: str) -> None:
     append_jsonl(REMINDERS_FILE, {"key": key, "at": now().isoformat(timespec="seconds")})
 
