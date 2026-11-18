@@ -435,16 +435,19 @@ def cmd_notion_backfill(args) -> int:
         return 1
     client, categories = notion.Notion(), notice_categories()
     log = client.ids()["log"]
-    made = updated = 0
+    made = updated = skipped = 0
     for path in sorted(RECORD_DATA_DIR.glob("*.jsonl")):
         for row in store.read_jsonl(path):
+            if not notion.worth_keeping(row):
+                skipped += 1
+                continue
             key, properties, blocks = notion.record_page(row, categories)
             if args.dry_run:
-                print(f"[dry-run] {row['at'][:16]} {properties['종류']['select'] and properties['종류']['select']['name']} {row.get('title', '')[:50]}")
+                print(f"[dry-run] {row['at'][:16]} {properties['종류']['select'] and properties['종류']['select']['name']} {notion.headline(row)}")
                 continue
             _, created = client.upsert(log, key, properties, blocks)
             made, updated = made + created, updated + (not created)
-    print(f"Notion 기록 새로 {made}, 고침 {updated}")
+    print(f"Notion 기록 새로 {made}, 고침 {updated}, 넣지 않음 {skipped} (내가 한 일·정한 일이 없는 대화)")
     return 0
 
 

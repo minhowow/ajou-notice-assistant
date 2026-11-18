@@ -206,12 +206,31 @@ def record_area(row: dict, categories: dict) -> str | None:
     return None
 
 
+DID = ("applied", "will_apply", "attending", "done")
+
+
+def worth_keeping(row: dict) -> bool:
+    """내가 한 일이나 정한 일이 있는 대화만 남긴다(11/18): 신청·참석·완료·하기로 한 결정, 또는 나에 대한 사실.
+
+    공지를 보고 '관심 없음'·'미정'으로 끝난 대화는 넣지 않는다. Notion은 나중에 내가 한 일을 보는 곳이다.
+    """
+    return any(decision.get("status") in DID for decision in row.get("decisions", [])) or bool(row.get("facts"))
+
+
+def headline(row: dict) -> str:
+    """제목은 대화 첫 줄('가능한 시간?')이 아니라 정리된 요약의 첫 문장으로."""
+    summary = str(row.get("summary") or "").strip()
+    first = re.split(r"(?<=[.!?。])\s", summary, maxsplit=1)[0] if summary else ""
+    text = first or str(row.get("title") or "대화")
+    return text if len(text) <= 80 else text[:79] + "…"
+
+
 def record_page(row: dict, categories: dict | None = None) -> tuple[str, dict, list[dict]]:
     """records/data의 한 줄을 (키, 속성, 본문)으로."""
-    applied = any(decision.get("status") in ("applied", "done") for decision in row.get("decisions", []))
+    applied = any(decision.get("status") in DID for decision in row.get("decisions", [])) or "합격" in str(row.get("summary", ""))
     moment = datetime.fromisoformat(row["at"])
     properties = {
-        "이름": {"title": rich(row.get("title") or row.get("summary", "")[:60] or "대화")},
+        "이름": {"title": rich(headline(row))},
         "날짜": {"date": {"start": moment.isoformat()}},
         "종류": select("지원·결과" if applied else "대화·결정"),
         "영역": select(record_area(row, categories or {})),
@@ -219,7 +238,9 @@ def record_page(row: dict, categories: dict | None = None) -> tuple[str, dict, l
         "원문": {"url": link_from(row.get("source", ""))},
         "비서가 씀": {"checkbox": True},
     }
-    blocks: list[dict] = []
+    blocks: list[dict] = paragraphs(row.get("summary", ""))
+    if row.get("title"):
+        blocks.append(block("paragraph", f"대화: {row['title']}"))
     if row.get("decisions"):
         blocks += [heading("결정")] + bullets([f"{d['about']} → {d['decision']}" for d in row["decisions"]])
     if row.get("facts"):
@@ -234,7 +255,7 @@ def record_page(row: dict, categories: dict | None = None) -> tuple[str, dict, l
 
 def add_record(row: dict, categories: dict | None = None, notion: Notion | None = None) -> str | None:
     """대화 기록 한 토막을 📒 기록에 남긴다. 실패해도 예외를 밖으로 내지 않는다."""
-    if not enabled():
+    if not enabled() or not worth_keeping(row):
         return None
     try:
         notion = notion or Notion()

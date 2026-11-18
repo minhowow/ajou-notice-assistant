@@ -75,7 +75,19 @@ def test_conversation_record_becomes_a_log_page():
     assert props["종류"]["select"]["name"] == "지원·결과" and props["영역"]["select"]["name"] == "장학·진로"
     assert props["원문"]["url"] == "https://discord.com/channels/1/156" and props["비서가 씀"]["checkbox"] is True
     kinds = [block["type"] for block in blocks]
-    assert kinds == ["heading_3", "bulleted_list_item", "heading_3", "to_do"]
+    assert kinds == ["paragraph", "paragraph", "heading_3", "bulleted_list_item", "heading_3", "to_do"]
+    assert props["이름"]["title"][0]["text"]["content"] == "4회 신청 완료"
+
+
+def test_only_records_of_things_i_did_or_decided_go_to_notion():
+    """11/18: 공지를 보고 '관심 없음'·'미정'으로 끝난 대화는 넣지 않는다. 제목은 요약 첫 문장."""
+    base = {"at": "2026-11-17T11:51:00+09:00", "decisions": [], "facts": [], "todos": [], "events": [], "questions": []}
+    assert not notion.worth_keeping({**base, "decisions": [{"status": "undecided"}, {"status": "skip"}]})
+    assert notion.worth_keeping({**base, "decisions": [{"status": "will_apply"}]})
+    assert notion.worth_keeping({**base, "facts": [{"area": "국제교류", "fact": "AIWS 버디 최종 합격"}]})
+    row = {**base, "title": "가능한 시간?", "summary": "AIWS Buddy 최종 합격 안내를 받음. 11/23 OT 참석 회신 요청."}
+    assert notion.headline(row) == "AIWS Buddy 최종 합격 안내를 받음."
+    assert notion.record_page(row)[1]["종류"]["select"]["name"] == "지원·결과"  # '합격'은 결과
 
 
 def test_long_text_is_split_under_the_notion_limit():
