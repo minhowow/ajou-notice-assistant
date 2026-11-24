@@ -131,6 +131,26 @@ def remove_event(event_id: str) -> dict:
     return call("calendar_remove", id=event_id)
 
 
+def drop_notice_events(key, today=None) -> list[str]:
+    """'안 함'(skip)으로 표시한 공지 묶음에서 비서가 넣은 앞으로의 일정을 지운다 (11/24 사용자: 안 할 일정이 캘린더를 더럽힌다).
+
+    재공지로 묶인 글까지 함께 본다. 키(`notice:<번호>:`)로만 고르므로 사용자가 직접 넣은 일정은 건드리지 않고,
+    Apps Script도 비서가 만든 일정만 지운다. 지난 일정은 기록으로 남긴다.
+    """
+    if not configured():
+        return []
+    from . import repost
+    ids = set(repost.group_ids(repost.root_of(key))) | {key}
+    prefixes = tuple(f"notice:{i}:" for i in ids)
+    today = today or datetime.now(KST).date()
+    removed = []
+    for row in list_events(today.isoformat(), (today + timedelta(days=400)).isoformat()):
+        if str(row.get("key") or "").startswith(prefixes):
+            remove_event(row["id"])
+            removed.append(row.get("title") or "")
+    return removed
+
+
 def event_link(row: dict, day: str = "") -> str:
     """일정 하나를 여는 주소. 스크립트가 htmlLink를 주지 않았으면 일정 id와 캘린더 id로 만든다(eid).
 

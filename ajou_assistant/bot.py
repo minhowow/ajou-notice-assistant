@@ -838,6 +838,11 @@ class Assistant(discord.Client):
             if interaction.message is not None:  # 끝난 공지는 핀 모음에서 뺀다.
                 await self.set_pin(interaction.message, key, False, release=False)
             await asyncio.to_thread(sync_push, f"auto: {key} {action}", str(ACTIONS_FILE))
+            if action == "skip":  # 안 할 공지의 일정은 캘린더에서도 뺀다(11/24).
+                from .cli import drop_calendar
+                note = await asyncio.to_thread(drop_calendar, key)
+                if not note.startswith("캘린더에서 뺀 일정 0개"):
+                    await interaction.followup.send(note, ephemeral=True)
             await self.close_threads(threads)
             return
         message = interaction.message

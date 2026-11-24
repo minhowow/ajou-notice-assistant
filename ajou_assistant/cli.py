@@ -829,8 +829,20 @@ def cmd_mark(args) -> int:
     store.mark_item(key, args.action)
     sync_push(f"auto: {key} {args.action}")
     print(f"{key}: {args.action}")
+    if args.action == "skip":
+        print(drop_calendar(key))
     pin_alert(key, args.action == "track")
     return 0
+
+
+def drop_calendar(key) -> str:
+    """안 하기로 한 공지의 앞으로의 일정을 캘린더에서 뺀다. 실패해도 표시는 이미 저장됐다."""
+    from . import google_bridge
+    try:
+        removed = google_bridge.drop_notice_events(key)
+    except (google_bridge.BridgeError, httpx.HTTPError, SetupError) as error:
+        return f"캘린더 정리 실패: {str(error)[:120]}"
+    return f"캘린더에서 뺀 일정 {len(removed)}개" + (": " + ", ".join(removed) if removed else "")
 
 
 def pin_alert(key, on: bool) -> None:

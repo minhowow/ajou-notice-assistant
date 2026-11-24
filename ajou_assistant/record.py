@@ -129,6 +129,11 @@ def apply_notice_decisions(result: dict) -> list[str]:
         key: int | str = int(notice) if notice.isdigit() else notice
         store.mark_item(key, action)
         lines.append(f"공지 {notice} 독촉 끔 ({decision['status']})")
+        if action == "skip":  # 안 하기로 한 공지의 앞으로의 일정은 캘린더에서 뺀다(11/24).
+            from .cli import drop_calendar
+            note = drop_calendar(key)
+            if not note.startswith("캘린더에서 뺀 일정 0개"):
+                lines.append(note)
     return lines
 
 
