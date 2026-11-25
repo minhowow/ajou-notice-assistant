@@ -104,6 +104,7 @@ DEFAULT_BOARDS = [
     Board("scholarship", "장학공지", "https://www.ajou.ac.kr/kr/ajou/notice_scholarship.do"),
     Board("international", "국제교류", "https://oia.ajou.ac.kr/oia/notice/notice.do"),
     Board("software", "SW학과", "https://www.ajou.ac.kr/sw/board/notice.do"),
+    Board("dorm", "생활관", "https://dorm.ajou.ac.kr/dorm/notice/notice.do"),  # v0.8.3, 같은 학교 CMS
     Board("program", "비교과", "https://job.ajou.ac.kr/Career/CareerTask/ProgramList.aspx", kind="program", pages=5),
     Board("recruit", "채용", "https://job.ajou.ac.kr/Career/Job/RecruitList.aspx?tabs=1&outside=1",
           kind="recruit", model="claude-haiku-5-5", pages=5),
